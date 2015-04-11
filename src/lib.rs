@@ -11,8 +11,8 @@ use std::mem;
 mod platform;
 
 enum PatchHistory {
-    Nop(*mut u8, usize),
     Replace32(*mut u32, u32),
+    Replace(*mut u8, Vec<u8>),
 }
 
 pub struct PatchManager {
@@ -43,16 +43,21 @@ pub struct Patch<'a> {
 
 impl<'a> Patch<'a> {
     pub unsafe fn nop<Addr: ToPointer>(&mut self, addr: &Addr, len: usize) {
-        let ptr = addr.ptr().offset(self.diff);
-        self.parent.history.push(Nop(ptr, len));
-        for i in 0..len {
-            *ptr.offset(i as isize) = platform::nop();
-        }
+        self.replace(addr, vec![platform::nop(); len])
     }
     pub unsafe fn replace_u32<Addr: ToPointer>(&mut self, addr: &Addr, val: u32) {
         let ptr: *mut u32 = mem::transmute(addr.ptr().offset(self.diff));
         self.parent.history.push(Replace32(ptr, val));
         *ptr = val;
+    }
+    pub unsafe fn replace<Addr:ToPointer>(&mut self, addr: &Addr, data: Vec<u8>) {
+        let ptr = addr.ptr().offset(self.diff);
+        let mut i = 0;
+        for byte in data.iter() {
+            *ptr.offset(i) = *byte;
+            i += 1;
+        }
+        self.parent.history.push(Replace(ptr, data));
     }
 }
 
