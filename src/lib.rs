@@ -1,6 +1,6 @@
-#![feature(libc)]
-#![feature(plugin)]
-#![plugin(core)]
+#![feature(libc, link_args)]
+#[link_args = "-static-libgcc"]
+extern {}
 extern crate libc;
 extern crate kernel32;
 extern crate winapi;
