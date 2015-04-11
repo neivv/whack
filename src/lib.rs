@@ -12,6 +12,7 @@ mod platform;
 
 enum PatchHistory {
     Nop(*mut u8, usize),
+    Replace32(*mut u32, u32),
 }
 
 pub struct PatchManager {
@@ -47,6 +48,11 @@ impl<'a> Patch<'a> {
         for i in 0..len {
             *ptr.offset(i as isize) = platform::nop();
         }
+    }
+    pub unsafe fn replace_u32<Addr: ToPointer>(&mut self, addr: &Addr, val: u32) {
+        let ptr: *mut u32 = mem::transmute(addr.ptr().offset(self.diff));
+        self.parent.history.push(Replace32(ptr, val));
+        *ptr = val;
     }
 }
 
