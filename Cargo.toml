@@ -1,5 +1,5 @@
 [package]
-name = "hacklib"
+name = "whack"
 version = "0.0.1"
 authors = ["Markus Heikkinen <ittevien@gmail.com>"]
 
