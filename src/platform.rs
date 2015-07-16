@@ -3,7 +3,7 @@ use libc::types::common::c95::c_void;
 use libc::consts::os::extra::{PAGE_EXECUTE_READWRITE, GENERIC_WRITE, FILE_SHARE_READ, FILE_ATTRIBUTE_NORMAL};
 use libc::consts::os::extra::{CREATE_ALWAYS};
 use libc::funcs::extra::kernel32::{VirtualProtect, VirtualQuery};
-use kernel32::{GetModuleHandleW, CreateFileA, SetStdHandle, HeapCreate, HeapAlloc};
+use kernel32::{GetModuleHandleW, CreateFileW, SetStdHandle, HeapCreate, HeapAlloc};
 use winapi::{HANDLE, STD_ERROR_HANDLE};
 
 use std::{mem, ptr};
@@ -18,6 +18,10 @@ pub fn exe_addr() -> *const c_void {
     unsafe {
         mem::transmute(GetModuleHandleW(ptr::null()))
     }
+}
+
+fn winapi_str(input: &str) -> Vec<u16> {
+    input.utf16_units().chain([0u16].iter().map(|v| *v)).collect::<Vec<u16>>()
 }
 
 /// Unprotects module, allowing its memory to be written and reapplies protection on drop.
@@ -59,7 +63,7 @@ impl Drop for MemoryProtection {
 }
 
 pub unsafe fn redirect_stderr(filename: &str) -> bool {
-    let handle = CreateFileA(mem::transmute(filename.as_bytes().as_ptr()), GENERIC_WRITE, FILE_SHARE_READ,
+    let handle = CreateFileW(winapi_str(filename).as_ptr(), GENERIC_WRITE, FILE_SHARE_READ,
         ptr::null_mut(), CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, ptr::null_mut());
     if handle != ptr::null_mut() {
         SetStdHandle(STD_ERROR_HANDLE, handle) != 0
