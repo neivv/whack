@@ -85,7 +85,7 @@ impl<'a> Patch<'a> {
         let data = self.alloc_exec(code_size);
         let mut data_pos = data;
 
-        while code != hook_pos { 
+        while code != hook_pos {
             *data_pos = *code;
             code = code.offset(1);
             data_pos = data_pos.offset(1);
@@ -96,7 +96,7 @@ impl<'a> Patch<'a> {
             code = code.offset(1);
             data_pos = data_pos.offset(1);
         }
-        while code != code_end { 
+        while code != code_end {
             *data_pos = *code;
             code = code.offset(1);
             data_pos = data_pos.offset(1);
