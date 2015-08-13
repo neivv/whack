@@ -8,6 +8,8 @@ use winapi::{HANDLE, STD_ERROR_HANDLE};
 
 use std::{mem, ptr};
 use std::num::wrapping::OverflowingOps;
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
 use ::ToPointer;
 
 pub fn nop() -> u8 {
@@ -20,8 +22,14 @@ pub fn exe_addr() -> *const c_void {
     }
 }
 
-fn winapi_str(input: &str) -> Vec<u16> {
-    input.utf16_units().chain([0u16].iter().map(|v| *v)).collect::<Vec<u16>>()
+pub fn library_addr(lib: &str) -> *const c_void {
+    unsafe {
+        mem::transmute(GetModuleHandleW(winapi_str(lib).as_ptr()))
+    }
+}
+
+fn winapi_str<T: AsRef<OsStr>>(input: T) -> Vec<u16> {
+    input.as_ref().encode_wide().chain(Some(0)).collect::<Vec<u16>>()
 }
 
 /// Unprotects module, allowing its memory to be written and reapplies protection on drop.

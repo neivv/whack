@@ -4,11 +4,5 @@ version = "0.0.1"
 authors = ["Markus Heikkinen <ittevien@gmail.com>"]
 
 [dependencies]
-#winapi = "0.1.17"
-#kernel32-sys = "*"
-
-[dependencies.winapi]
-path = "winapi-rs"
-
-[dependencies.kernel32-sys]
-path = "winapi-rs/lib/kernel32-sys"
+winapi = "0.2.2"
+kernel32-sys = "*"

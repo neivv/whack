@@ -1,4 +1,4 @@
-#![feature(libc, link_args, wrapping, str_utf16, asm)]
+#![feature(libc, link_args, wrapping, asm)]
 #[link_args = "-static-libgcc"]
 extern {}
 extern crate libc;
@@ -8,6 +8,7 @@ extern crate winapi;
 use PatchHistory::*;
 use std::{ops, mem};
 use std::marker::PhantomData;
+use std::num::wrapping::OverflowingOps;
 
 mod platform;
 
@@ -28,42 +29,55 @@ impl PatchManager {
             exec_heap: platform::ExecutableHeap::new(),
         }
     }
-    pub unsafe fn patch_exe<P: FnMut(&mut Patch)>(&mut self, mut closure: P) {
+
+    pub unsafe fn patch_exe<P: FnMut(Patch)>(&mut self, mut closure: P) {
         let exe_addr = platform::exe_addr();
-        let mut patch = Patch {
+        let _protection = platform::MemoryProtection::new(exe_addr);
+        closure(Patch {
             parent: self,
-            _protection: platform::MemoryProtection::new(exe_addr),
-            diff: 0,
-        };
-        closure(&mut patch);
+            base: mem::transmute(exe_addr),
+        });
+    }
+
+    pub unsafe fn patch_exe_with_base<P: FnMut(PatchWithBase)>(&mut self, base: usize, mut closure: P) {
+        self.patch_exe(|patch| {
+            closure(PatchWithBase {
+                patch: patch,
+                expected_base: base,
+            });
+        });
+    }
+
+    pub unsafe fn patch_library<P: FnMut(Patch)>(&mut self, lib: &str, mut closure: P) {
+        let lib_addr = platform::library_addr(lib);
+        let _protection = platform::MemoryProtection::new(lib_addr);
+        closure(Patch {
+            parent: self,
+            base: mem::transmute(lib_addr),
+        });
+    }
+
+    pub unsafe fn patch_library_with_base<P: FnMut(PatchWithBase)>(&mut self, lib: &str, base: usize, mut closure: P) {
+        self.patch_library(lib, |patch| {
+            closure(PatchWithBase {
+                patch: patch,
+                expected_base: base,
+            });
+        });
     }
 }
 
 pub struct Patch<'a> {
     parent: &'a mut PatchManager,
-    _protection: platform::MemoryProtection,
-    diff: isize,
+    base: usize,
+}
+
+pub struct PatchWithBase<'a> {
+    patch: Patch<'a>,
+    expected_base: usize
 }
 
 impl<'a> Patch<'a> {
-    pub unsafe fn nop<Addr: ToPointer>(&mut self, addr: &Addr, len: usize) {
-        self.replace(addr, vec![platform::nop(); len])
-    }
-    pub unsafe fn replace_u32<Addr: ToPointer>(&mut self, addr: &Addr, val: u32) {
-        let ptr: *mut u32 = mem::transmute(addr.ptr().offset(self.diff));
-        self.parent.history.push(Replace32(ptr, val));
-        *ptr = val;
-    }
-    pub unsafe fn replace<Addr: ToPointer>(&mut self, addr: &Addr, data: Vec<u8>) {
-        let ptr = addr.ptr().offset(self.diff);
-        let mut i = 0;
-        for byte in data.iter() {
-            *ptr.offset(i) = *byte;
-            i += 1;
-        }
-        self.parent.history.push(Replace(ptr, data));
-    }
-
     pub unsafe fn hook<Hook>(&mut self, _hook: Hook, target: Hook::Target) where Hook: HookableAsmWrap {
         let data = self.make_hook_wrapper::<Hook>(target);
         platform::jump_hook(Hook::address(), mem::transmute(data));
@@ -72,7 +86,8 @@ impl<'a> Patch<'a> {
     unsafe fn make_hook_wrapper<Hook>(&mut self, target: Hook::Target) -> *mut u8 where
         Hook: HookableAsmWrap
     {
-        let mut hook_ptr: *mut u8 = mem::transmute(&target);
+        let diff = self.base.overflowing_sub(Hook::expected_base()).0;
+        let mut hook_ptr: *mut u8 = mem::transmute(mem::transmute::<_, usize>(&target).overflowing_add(diff).0);
         let mut code = Hook::get_hook_wrapper();
         let mut code_size = 0;
         while *code != 0xcc { code = code.offset(1); }
@@ -114,6 +129,46 @@ impl<'a> Patch<'a> {
     }
 }
 
+impl<'a> PatchWithBase<'a> {
+    fn current_base<Addr: ToPointer>(&self, addr: Addr) -> *mut u8 {
+        let diff = self.patch.base.overflowing_sub(self.expected_base).0;
+        unsafe { mem::transmute(mem::transmute::<_, usize>(addr.ptr()).overflowing_add(diff).0) }
+    }
+
+    pub unsafe fn nop<Addr: ToPointer>(&mut self, addr: Addr, len: usize) {
+        self.replace(addr, vec![platform::nop(); len])
+    }
+
+    pub unsafe fn replace_u32<Addr: ToPointer>(&mut self, addr: Addr, val: u32) {
+        let ptr: *mut u32 = mem::transmute(self.current_base(addr));
+        self.patch.parent.history.push(Replace32(ptr, val));
+        *ptr = val;
+    }
+
+    pub unsafe fn replace<Addr: ToPointer>(&mut self, addr: Addr, data: Vec<u8>) {
+        let ptr = self.current_base(addr);
+        let mut i = 0;
+        for byte in data.iter() {
+            *ptr.offset(i) = *byte;
+            i += 1;
+        }
+        self.patch.parent.history.push(Replace(ptr, data));
+    }
+}
+
+impl<'a> ops::Deref for PatchWithBase<'a> {
+    type Target = Patch<'a>;
+    fn deref(&self) -> &Patch<'a> {
+        &self.patch
+    }
+}
+
+impl<'a> ops::DerefMut for PatchWithBase<'a> {
+    fn deref_mut(&mut self) -> &mut Patch<'a> {
+        &mut self.patch
+    }
+}
+
 pub trait ToPointer {
     fn ptr(&self) -> *mut u8;
 }
@@ -134,6 +189,7 @@ pub trait HookableAsmWrap {
     type Target;
     unsafe fn get_hook_wrapper() -> *const u8;
     fn address() -> usize;
+    fn expected_base() -> usize;
 }
 
 pub struct Variable<T> {
