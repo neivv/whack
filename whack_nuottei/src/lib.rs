@@ -42,8 +42,8 @@ fn to_rust_type(cx: &ExtCtxt, sp: Span, input: &nuottei::Type, default_ty: Optio
                 "int" => quote_ty!(cx, i32),
                 "word" => quote_ty!(cx, u16),
                 "byte" => quote_ty!(cx, u8),
-                "char" => quote_ty!(cx, ::libc::c_char),
-                "void" => quote_ty!(cx, ::libc::c_void),
+                "char" => quote_ty!(cx, ::std::os::raw::c_char),
+                "void" => quote_ty!(cx, ::std::os::raw::c_void),
                 n => cx.ty_ident(sp, cx.ident_of(n)),
             })
         }
