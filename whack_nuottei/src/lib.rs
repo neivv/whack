@@ -209,10 +209,10 @@ fn make_body(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> P<ast::Blo
     cx.block(sp, statements, ret_expr)
 }
 
-fn item_pub(sp: Span, name: ast::Ident, node: ast::Item_) -> P<ast::Item> {
+fn item_pub(sp: Span, name: ast::Ident, attrs: Vec<ast::Attribute>, node: ast::Item_) -> P<ast::Item> {
     P(ast::Item {
         ident: name,
-        attrs: Vec::new(),
+        attrs: attrs,
         id: ast::DUMMY_NODE_ID,
         node: node,
         vis: ast::Public,
@@ -221,7 +221,7 @@ fn item_pub(sp: Span, name: ast::Ident, node: ast::Item_) -> P<ast::Item> {
 }
 
 fn item_pub_fn(cx: &ExtCtxt, sp: Span, name: ast::Ident, inputs: Vec<ast::Arg>, output: P<ast::Ty>, body: P<ast::Block>) -> P<ast::Item> {
-    item_pub(sp, name,
+    item_pub(sp, name, vec!(),
              ast::ItemFn(cx.fn_decl(inputs, output),
                          ast::Unsafety::Unsafe,
                          ast::Constness::NotConst,
@@ -438,6 +438,7 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
                 } else {
                     // FIXME: Incorrect span
                     sections.push(item_pub(span, cx.ident_of(&current_section),
+                                           vec!(quote_attr!(cx, #[allow(non_snake_case)])),
                                            ast::ItemMod(ast::Mod {
                                                inner: span,
                                                items: items,
@@ -463,6 +464,7 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
     } else {
         // FIXME: Incorrect span
         sections.push(item_pub(DUMMY_SP, cx.ident_of(&current_section),
+                               vec!(quote_attr!(cx, #[allow(non_snake_case)])),
                                ast::ItemMod(ast::Mod {
                                    inner: DUMMY_SP,
                                    items: items,
@@ -481,7 +483,7 @@ fn generate_from_txt(cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacR
     }, |var, cx, span, items| {
         match ty_expr_from_var(cx, span, &var) {
             Some((ty, expr)) => {
-                items.push(item_pub(span, cx.ident_of(&var.name), ast::ItemStatic(ty, ast::MutMutable, expr)));
+                items.push(item_pub(span, cx.ident_of(&var.name), vec!(), ast::ItemStatic(ty, ast::MutMutable, expr)));
             }
             None => {
                 cx.span_err(span, &format!("Variable {} does not have a type", var.name));
@@ -496,7 +498,7 @@ fn generate_hooks(cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResu
         let struct_ty = cx.ty_ident(span, cx.ident_of(&func.name));
         let hook_impl = hook_impl(cx, span, &func);
         let get_wrapper = hook_get_wrapper(cx, span, &func, base as usize);
-        items.push(item_pub(span, cx.ident_of(&func.name),
+        items.push(item_pub(span, cx.ident_of(&func.name), vec!(),
                             ast::ItemStruct(
                                 P(ast::StructDef {
                                     fields: vec!(),
