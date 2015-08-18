@@ -148,28 +148,25 @@ unsafe fn x86_copy_instructions(mut src: *const u8, mut dst: *mut u8, mut len: i
 }
 
 pub unsafe fn call_hook<T: ToPointer>(src: T, tgt: *const u8, heap: &mut ExecutableHeap) {
-    let mut ptr = src.ptr();
+    let ptr = src.ptr();
     let mut wrapper_size = 0isize;
     while wrapper_size < 5 {
         wrapper_size += x86_ins_size(ptr.offset(wrapper_size)) as isize;
     }
-    let wrapper = heap.allocate(1 + 5 + wrapper_size as usize + 2);
+    let wrapper = heap.allocate(1 + 5 + wrapper_size as usize + 6);
     *wrapper.offset(0) = 0x60; // Pushad
     *wrapper.offset(1 + 5) = 0x61; // Popad
-    *wrapper.offset(1 + 5 + 1 + wrapper_size) = 0xc3; // Retn
     x86_copy_instructions(ptr, wrapper.offset(1 + 5 + 1), wrapper_size);
     for i in 5..wrapper_size {
         *ptr.offset(i) = nop();
     }
-    *ptr = 0xe8;
-    ptr = ptr.offset(1);
-    let val: usize = mem::transmute::<_, usize>(wrapper).overflowing_sub(mem::transmute::<_, usize>(ptr) + 4).0;
-    let hook_ptr: *mut usize = mem::transmute(ptr);
-    *hook_ptr = val;
+    jump_hook(src, wrapper);
     *wrapper.offset(1) = 0xe8;
     let val: usize = mem::transmute::<_, usize>(tgt).overflowing_sub(mem::transmute::<_, usize>(wrapper) + 6).0;
     let hook_ptr: *mut usize = mem::transmute(wrapper.offset(2));
     *hook_ptr = val;
+    // Jump back to original code
+    jump_hook(wrapper.offset(wrapper_size + 7), ptr.offset(5));
 }
 
 #[test]

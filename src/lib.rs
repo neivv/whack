@@ -179,6 +179,12 @@ impl ToPointer for usize {
     }
 }
 
+impl<T> ToPointer for *mut T {
+    fn ptr(&self) -> *mut u8 {
+        unsafe { mem::transmute::<*mut T, *mut u8>(*self) }
+    }
+}
+
 /// Redirects stderr to file.
 /// Accepts only ascii strings for filename to avoid unicode dependency.
 pub unsafe fn redirect_stderr(filename: &str) -> bool {
