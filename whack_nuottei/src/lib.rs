@@ -177,13 +177,16 @@ fn get_target_reg(func: &nuottei::Function) -> &'static str {
 }
 
 fn generate_asm_code(func: &nuottei::Function, target_reg: &str) -> InternedString {
+    let mut result = String::new();
     let stack_arg_amt = func.args.iter().filter(|a| a.location.stack().is_some()).count();
-    let stack_ins = if stack_arg_amt != 0 {
-        format!("subl $${}, %esp\n\t", stack_arg_amt * 4)
-    } else {
-        "".to_string()
-    };
-    token::intern_and_get_ident(&format!("{}calll *%{}", stack_ins, target_reg))
+    if stack_arg_amt != 0 {
+        write!(result, "subl $${}, %esp\n", stack_arg_amt * 4).unwrap();
+    }
+    write!(result, "calll *%{}\n", target_reg).unwrap();
+    if stack_arg_amt != 0 && func.attrs.iter().find(|s| *s == "cdecl").is_some() {
+        write!(result, "addl $${}, %esp\n", stack_arg_amt * 4).unwrap();
+    }
+    token::intern_and_get_ident(&result)
 }
 
 fn make_body(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> P<ast::Block> {
@@ -277,10 +280,14 @@ fn hook_impl(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> Vec<P<ast:
         }
         stack_pos += 1;
     }
-    let stack_size = func.args.iter().filter(|a| a.location.stack().is_some()).count();
+    let stack_size = match func.attrs.iter().find(|x| *x == "cdecl").is_some() {
+        true => 0,
+        false => func.args.iter().filter(|a| a.location.stack().is_some()).count(),
+    };
     let arg_count = func.args.len();
-    write!(asm_code, "mov $$0xcccccccc, %eax\n calll *%eax\n addl $${}, %esp\n retl $${}",
-           arg_count * mem::size_of::<usize>(), stack_size * mem::size_of::<usize>()).unwrap();
+    write!(asm_code, "mov $$0xcccccccc, %eax\n calll *%eax\n").unwrap();
+    write!(asm_code, "addl $${}, %esp\n", arg_count * mem::size_of::<usize>()).unwrap();
+    write!(asm_code, "retl $${}", stack_size * mem::size_of::<usize>()).unwrap();
     let asm_expr = make_asm(cx, sp, token::intern_and_get_ident(&asm_code), vec!(), vec!(), vec!());
     let sig = static_method_sig(vec!(), ast::DefaultReturn(sp));
     let block = cx.block(sp, vec!(),
