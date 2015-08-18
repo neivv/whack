@@ -118,9 +118,11 @@ unsafe fn x86_sib_ins_size(ins: *const u8) -> usize {
 unsafe fn x86_ins_size(ins: *const u8) -> usize {
     match *ins {
         push_pop if push_pop >= 0x50 && push_pop < 0x62 => 1,
+        0x68 => 5,
         n if n >= 0x84 && n < 0x90 => x86_sib_ins_size(ins),
         0x83 | 0xc6 => x86_sib_ins_size(ins) + 1,
-        n => panic!("Unimpl ins size {}", n),
+        0xe8 | 0xe9 => 5,
+        n => panic!("Unimpl ins size 0x{:x}", n),
     }
 }
 
@@ -129,6 +131,14 @@ unsafe fn x86_copy_instructions(mut src: *const u8, mut dst: *mut u8, mut len: i
         let ins_len = x86_ins_size(src) as isize;
         // Relative jumps need to be handled differently
         match *src {
+            0xe8 | 0xe9 => {
+                assert!(ins_len == 5);
+                ptr::copy_nonoverlapping(src, dst, 5);
+                let diff = mem::transmute::<_, usize>(dst).overflowing_sub(mem::transmute(src)).0;
+                let jump_offset: *mut usize = mem::transmute(dst.offset(1));
+                *jump_offset = (*jump_offset).overflowing_sub(diff).0;
+
+            }
             _ => ptr::copy_nonoverlapping(src, dst, ins_len as usize),
         }
         src = src.offset(ins_len);
@@ -176,9 +186,12 @@ fn test_x86_ins_size() {
 #[test]
 fn test_x86_copy_ins() {
     let ins1 = vec![0x89, 0x45, 0xfc, 0xff];
+    let mut ins2 = vec![0xe8, 0x50, 0x60, 0x70, 0x80, 0xff, 0xff, 0xff, 0xff, 0xff];
     unsafe {
         let mut tgt = vec![0; 5];
         x86_copy_instructions(ins1.as_ptr(), tgt.as_mut_ptr(), 1);
         assert_eq!(tgt, vec![0x89, 0x45, 0xfc, 0x00, 0x00]);
+        x86_copy_instructions(ins2.as_ptr(), ins2.as_mut_ptr().offset(5), 1);
+        assert_eq!(ins2, vec![0xe8, 0x50, 0x60, 0x70, 0x80, 0xe8, 0x4b, 0x60, 0x70, 0x80]);
     }
 }
