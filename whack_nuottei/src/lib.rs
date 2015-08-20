@@ -146,17 +146,18 @@ fn out_in_clobber(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> (Vec<
     };
     let inputs: Vec<(InternedString, P<ast::Expr>)> = func.args.iter()
         .filter(|a| a.location.reg().is_some())
-        .map(|a| (token::intern_and_get_ident(&format!("{{{}}}", a.location.reg().unwrap())), cx.expr_ident(sp, cx.ident_of(&arg_name(a)))))
+        .map(|a| (token::intern_and_get_ident(&format!("{{{}}}", a.location.reg().unwrap())),
+                  cx.expr_ident(sp, cx.ident_of(&arg_name(a)))))
         .collect();
     let mut clobber = vec![InternedString::new("memory")];
     if out.len() == 0 && !inputs.iter().any(|tp| tp.0.find("eax").is_some()) {
-        clobber.push(InternedString::new("{eax}"));
+        clobber.push(InternedString::new("eax"));
     }
     if !inputs.iter().any(|tp| tp.0.find("ecx").is_some()) {
-        clobber.push(InternedString::new("{ecx}"));
+        clobber.push(InternedString::new("ecx"));
     }
     if !inputs.iter().any(|tp| tp.0.find("edx").is_some()) {
-        clobber.push(InternedString::new("{edx}"));
+        clobber.push(InternedString::new("edx"));
     }
     (out, inputs, clobber)
 }
@@ -195,11 +196,16 @@ fn make_body(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> P<ast::Blo
         statements.push(quote_stmt!(cx, let ret: usize;).unwrap());
     }
     add_stack_args(cx, sp, func, &mut statements);
-    let (out, mut input, clob) = out_in_clobber(cx, sp, func);
+    let (out, mut input, mut clob) = out_in_clobber(cx, sp, func);
     let target_reg = get_target_reg(func);
     let target_id = cx.ident_of("_target");
     statements.push(cx.stmt_let_typed(sp, true, target_id, cx.ty_ident(sp, cx.ident_of("usize")), cx.expr_usize(sp, func.address as usize)));
     input.push((token::intern_and_get_ident(&format!("{{{}}}", target_reg)), cx.expr_ident(sp, target_id)));
+    if target_reg == "ecx" {
+        clob.retain(|n| n.find("ecx").is_none());
+    } else if target_reg == "edx" {
+        clob.retain(|n| n.find("edx").is_none());
+    }
     let asm_code = generate_asm_code(func, target_reg);
     let asm_expr = make_asm(cx, sp, asm_code, out, input, clob);
     statements.push(cx.stmt_expr(asm_expr));
