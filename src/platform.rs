@@ -1,15 +1,12 @@
-use libc::types::os::arch::extra::{DWORD, MEMORY_BASIC_INFORMATION};
-use libc::types::common::c95::c_void;
-use libc::consts::os::extra::{PAGE_EXECUTE_READWRITE, GENERIC_WRITE, FILE_SHARE_READ, FILE_ATTRIBUTE_NORMAL};
-use libc::consts::os::extra::{CREATE_ALWAYS};
-use libc::funcs::extra::kernel32::{VirtualProtect, VirtualQuery};
 use kernel32::{GetModuleHandleW, CreateFileW, SetStdHandle, HeapCreate, HeapAlloc};
-use winapi::{HANDLE, STD_ERROR_HANDLE};
+use kernel32::{VirtualProtect, VirtualQuery};
+use winapi::{DWORD, HANDLE, STD_ERROR_HANDLE, CREATE_ALWAYS, MEMORY_BASIC_INFORMATION};
+use winapi::{PAGE_EXECUTE_READWRITE, GENERIC_WRITE, FILE_SHARE_READ, FILE_ATTRIBUTE_NORMAL};
 
 use std::{mem, ptr};
-use std::num::wrapping::OverflowingOps;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::os::raw::c_void;
 use ::ToPointer;
 
 pub fn nop() -> u8 {

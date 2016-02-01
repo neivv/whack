@@ -1,8 +1,8 @@
 #![crate_type="dylib"]
-#![feature(quote, plugin_registrar, slice_patterns, rustc_private, convert)]
+#![feature(quote, plugin_registrar, slice_patterns, rustc_private)]
 
 extern crate nuottei;
-extern crate rustc;
+extern crate rustc_plugin;
 extern crate syntax;
 
 use syntax::codemap::{DUMMY_SP, Span, Spanned, Pos};
@@ -14,8 +14,10 @@ use syntax::print::pprust;
 use syntax::util::small_vector::SmallVector;
 use syntax::fold::Folder;
 use syntax::ptr::P;
-use syntax::{ast_util, abi};
-use rustc::plugin::Registry;
+use syntax::abi;
+use rustc_plugin::Registry;
+
+use std::default::Default;
 use std::path::PathBuf;
 use std::mem;
 use std::fmt::Write;
@@ -82,12 +84,17 @@ fn make_asm(cx: &ExtCtxt, sp: Span, asm: InternedString, outputs: Vec<(InternedS
     cx.expr(sp, ast::ExprInlineAsm(ast::InlineAsm {
         asm: asm,
         asm_str_style: ast::StrStyle::CookedStr,
-        outputs: outputs.into_iter().map(|tp| (tp.0, tp.1, false)).collect(),
+        outputs: outputs.into_iter().map(|tp| ast::InlineAsmOutput {
+            constraint: tp.0,
+            expr: tp.1,
+            is_rw: false,
+            is_indirect: false,
+        }).collect(),
         inputs: inputs,
         clobbers: clobbers,
         volatile: true,
         alignstack: false,
-        dialect: ast::AsmDialect::AsmAtt,
+        dialect: ast::AsmDialect::Att,
         expn_id: cx.backtrace(),
     }))
 }
@@ -125,7 +132,8 @@ fn add_stack_args(cx: &ExtCtxt, sp: Span, func: &nuottei::Function, stmts: &mut 
         stmts.push(cx.stmt_expr(P(ast::Expr {
             id: ast::DUMMY_NODE_ID,
             node: ast::ExprAssign(left, right),
-            span: sp
+            span: sp,
+            attrs: None,
         })));
     }
 }
@@ -199,7 +207,9 @@ fn make_body(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> P<ast::Blo
     let (out, mut input, mut clob) = out_in_clobber(cx, sp, func);
     let target_reg = get_target_reg(func);
     let target_id = cx.ident_of("_target");
-    statements.push(cx.stmt_let_typed(sp, true, target_id, cx.ty_ident(sp, cx.ident_of("usize")), cx.expr_usize(sp, func.address as usize)));
+    let path = cx.path(DUMMY_SP, vec!(cx.ident_of("func_addr"), cx.ident_of(&func.name)));
+    let addr = cx.expr_path(path);
+    statements.push(cx.stmt_let_typed(sp, true, target_id, quote_ty!(cx, usize), addr));
     input.push((token::intern_and_get_ident(&format!("{{{}}}", target_reg)), cx.expr_ident(sp, target_id)));
     if target_reg == "ecx" {
         clob.retain(|n| n.find("ecx").is_none());
@@ -235,7 +245,7 @@ fn item_pub_fn(cx: &ExtCtxt, sp: Span, name: ast::Ident, inputs: Vec<ast::Arg>, 
                          ast::Unsafety::Unsafe,
                          ast::Constness::NotConst,
                          abi::Rust,
-                         ast_util::empty_generics(),
+                         Default::default(),
                          body))
 }
 
@@ -249,8 +259,7 @@ fn ty_expr_from_var(cx: &ExtCtxt, sp: Span, var: &nuottei::Variable) -> Option<(
                                  Vec::new(),
                                  vec!( t.clone() ),
                                  Vec::new());
-        let addr = var.address as usize;
-        let expr = quote_expr!(cx, ::whack::Variable { address: $addr, phantom: ::std::marker::PhantomData });
+        let expr = quote_expr!(cx, ::whack::Variable { address: !0, phantom: ::std::marker::PhantomData });
         (cx.ty_path(path), expr)
     })
 }
@@ -265,7 +274,7 @@ fn static_method_sig(inputs: Vec<ast::Arg>, output: ast::FunctionRetTy) -> ast::
             output: output,
             variadic: false,
         }),
-        generics: ast_util::empty_generics(),
+        generics: Default::default(),
         explicit_self: Spanned {
             node: ast::SelfStatic,
             span: DUMMY_SP,
@@ -303,7 +312,7 @@ fn hook_impl(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> Vec<P<ast:
         ident: cx.ident_of("__asm_code"),
         vis: ast::Inherited,
         attrs: vec!(),
-        node: ast::MethodImplItem(sig, block),
+        node: ast::ImplItemKind::Method(sig, block),
         span: sp,
     });
     vec!(asm_code_fn)
@@ -320,7 +329,7 @@ fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expect
             output: output,
             variadic: false,
         }),
-        generics: ast_util::empty_generics(),
+        generics: Default::default(),
         explicit_self: Spanned {
             node: ast::SelfStatic,
             span: sp,
@@ -340,7 +349,7 @@ fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expect
         ident: cx.ident_of("get_hook_wrapper"),
         vis: ast::Inherited,
         attrs: vec!(),
-        node: ast::MethodImplItem(sig, block),
+        node: ast::ImplItemKind::Method(sig, block),
         span: sp,
     });
     let address = P(ast::ImplItem {
@@ -348,7 +357,7 @@ fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expect
         ident: cx.ident_of("address"),
         vis: ast::Inherited,
         attrs: vec!(),
-        node: ast::MethodImplItem(addr_sig, addr_block),
+        node: ast::ImplItemKind::Method(addr_sig, addr_block),
         span: sp,
     });
     let expected_base = P(ast::ImplItem {
@@ -356,7 +365,7 @@ fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expect
         ident: cx.ident_of("expected_base"),
         vis: ast::Inherited,
         attrs: vec!(),
-        node: ast::MethodImplItem(expected_base_sig, expected_base_block),
+        node: ast::ImplItemKind::Method(expected_base_sig, expected_base_block),
         span: sp,
     });
     let target_type = cx.ty(sp, ast::TyBareFn(P(ast::BareFnTy {
@@ -374,7 +383,7 @@ fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expect
         ident: cx.ident_of("Target"),
         vis: ast::Inherited,
         attrs: vec!(),
-        node: ast::TypeImplItem(target_type),
+        node: ast::ImplItemKind::Type(target_type),
         span: sp,
     });
     vec!(get_wrapper, address, expected_base, target_type_impl)
@@ -384,7 +393,7 @@ fn item_impl(cx: &mut ExtCtxt, trait_path: Option<ast::Path>, struct_ty: P<ast::
     cx.item(DUMMY_SP, cx.ident_of(""), vec!(), ast::ItemImpl(
         ast::Unsafety::Normal,
         ast::ImplPolarity::Positive,
-        ast_util::empty_generics(),
+        Default::default(),
         trait_path.map(|x| ast::TraitRef { path: x, ref_id: ast::DUMMY_NODE_ID }),
         struct_ty,
         items
@@ -392,10 +401,13 @@ fn item_impl(cx: &mut ExtCtxt, trait_path: Option<ast::Path>, struct_ty: P<ast::
 }
 
 /// Common iterate lines/sections with spans -loop for all macros
-fn parse_file<Func, Var>(cx: &mut ExtCtxt, sp: Span, args: &[TokenTree],
-                         mut handle_func: Func, mut handle_var: Var) -> Box<MacResult + 'static>
+/// The callbacks are becoming unnecessarily complicated <.<
+fn parse_file<Func, Var, Section>(cx: &mut ExtCtxt, sp: Span, args: &[TokenTree],
+                                  mut handle_func: Func, mut handle_var: Var, mut section_end: Section
+                                 ) -> Box<MacResult + 'static>
 where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>, u64),
-      Var: FnMut(nuottei::Variable, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>) {
+      Var: FnMut(nuottei::Variable, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>),
+      Section: FnMut(u64, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>, &Vec<(String, usize)>, &Vec<(String, usize)>) {
     let filename = match parse(cx, args) {
         Some(f) => f,
         None => return DummyResult::any(sp),
@@ -427,6 +439,10 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
     let mut current_section = String::new();
     let mut current_base = 0;
     let mut sections = Vec::new();
+    // For generating base addr init funs
+    let mut funcs = Vec::new();
+    let mut vars = Vec::new();
+
     let super_path = cx.path(DUMMY_SP, vec!(cx.ident_of("super")));
     items.push(cx.item_use(DUMMY_SP, ast::Inherited, P(ast::ViewPath {
         node: ast::ViewPathGlob(super_path.clone()),
@@ -439,8 +455,14 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
             expn_id: cx.backtrace
         };
         match nuottei::parse_line(line, nuottei::DefaultMutability::None) {
-            Ok(ParseResult::Function(func)) => handle_func(func, cx, span, &mut items, current_base),
-            Ok(ParseResult::Variable(var)) => handle_var(var, cx, span, &mut items),
+            Ok(ParseResult::Function(func)) => {
+                funcs.push((func.name.clone(), func.address as usize));
+                handle_func(func, cx, span, &mut items, current_base);
+            }
+            Ok(ParseResult::Variable(var)) => {
+                vars.push((var.name.clone(), var.address as usize));
+                handle_var(var, cx, span, &mut items);
+            }
             Ok(ParseResult::Nothing) => (),
             Ok(ParseResult::Section(name, base)) => {
                 // FIXME? Could just have items be in root namespace
@@ -450,6 +472,7 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
                     }
                 } else {
                     // FIXME: Incorrect span
+                    section_end(current_base, cx, span, &mut items, &vars, &funcs);
                     sections.push(item_pub(span, cx.ident_of(&current_section),
                                            vec!(quote_attr!(cx, #[allow(non_snake_case)])),
                                            ast::ItemMod(ast::Mod {
@@ -464,6 +487,8 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
                 })));
                 current_section = name;
                 current_base = base.unwrap_or(current_base);
+                funcs.clear();
+                vars.clear();
             }
             Err(desc) => cx.span_err(span, &desc),
         }
@@ -476,6 +501,7 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
         }
     } else {
         // FIXME: Incorrect span
+        section_end(current_base, cx, DUMMY_SP, &mut items, &vars, &funcs);
         sections.push(item_pub(DUMMY_SP, cx.ident_of(&current_section),
                                vec!(quote_attr!(cx, #[allow(non_snake_case)])),
                                ast::ItemMod(ast::Mod {
@@ -486,8 +512,38 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
     MacEager::items(SmallVector::many(sections))
 }
 
+/// Generates code for `init_module_vars()`, setting addresses of variables and
+/// functions to correct values
+fn init_module_body(cx: &mut ExtCtxt, vars: &Vec<(String, usize)>, funcs: &Vec<(String, usize)>, base: usize) -> P<ast::Block> {
+    let mut statements = Vec::new();
+    statements.push(quote_stmt!(cx, let base: usize = ::std::mem::transmute(ptr);).unwrap());
+    for var in vars.iter() {
+        let offset = var.1 - base;
+        let field_expr = cx.expr(DUMMY_SP, ast::ExprField(cx.expr_ident(DUMMY_SP, cx.ident_of(&var.0)), Spanned {
+            node: cx.ident_of("address"),
+            span: DUMMY_SP,
+        }));
+        let expr = ast::ExprAssign(field_expr,
+                                   quote_expr!(cx, base + $offset));
+        statements.push(cx.stmt_expr(cx.expr(DUMMY_SP, expr)));
+    }
+    for func in funcs.iter() {
+        let offset = func.1 - base;
+        let path = cx.path(DUMMY_SP, vec!(cx.ident_of("func_addr"), cx.ident_of(&func.0)));
+        let expr = ast::ExprAssign(cx.expr_path(path), quote_expr!(cx, base + $offset));
+        statements.push(cx.stmt_expr(cx.expr(DUMMY_SP, expr)));
+    }
+    cx.block(DUMMY_SP, statements, None)
+}
+
+/// Generates static variables containing function addresses
+fn make_func_addrs(cx: &mut ExtCtxt, funcs: &Vec<(String, usize)>) -> Vec<P<ast::Item>> {
+    funcs.iter().map(|&(ref name, _)| {
+        item_pub(DUMMY_SP, cx.ident_of(&name), vec!(), ast::ItemStatic(quote_ty!(cx, usize), ast::MutMutable, quote_expr!(cx, !0)))
+    }).collect()
+}
+
 fn generate_from_txt(cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResult + 'static> {
-    // FIXME: _base
     parse_file(cx, sp, args, |func, cx, span, items, _base| {
         let inputs = make_inputs(cx, span, &func);
         let output = to_rust_type(cx, span, &func.ret_type, Some(unit_ty(cx, sp))).unwrap();
@@ -502,6 +558,16 @@ fn generate_from_txt(cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacR
                 cx.span_err(span, &format!("Variable {} does not have a type", var.name));
             }
         };
+    }, |base, cx, span, items, vars, funcs| {
+        let input = cx.arg(span, cx.ident_of("ptr"), quote_ty!(cx, *const ::std::os::raw::c_void));
+        let body = init_module_body(cx, vars, funcs, base as usize);
+        let func_addrs = make_func_addrs(cx, funcs);
+        items.push(item_pub_fn(cx, span, cx.ident_of("init_module_vars"), vec!(input), unit_ty(cx, span), body));
+        items.push(cx.item(DUMMY_SP, cx.ident_of("func_addr"), vec!(),
+                               ast::ItemMod(ast::Mod {
+                                   inner: DUMMY_SP,
+                                   items: func_addrs,
+                               })));
     })
 }
 
@@ -513,23 +579,31 @@ fn generate_hooks(cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResu
         let get_wrapper = hook_get_wrapper(cx, span, &func, base as usize);
         items.push(item_pub(span, cx.ident_of(&func.name), vec!(),
                             ast::ItemStruct(
-                                P(ast::StructDef {
-                                    fields: vec!(),
-                                    ctor_id: Some(ast::DUMMY_NODE_ID),
-                                }),
-                                ast_util::empty_generics())));
+                                ast::VariantData::Unit(ast::DUMMY_NODE_ID),
+                                Default::default())));
 
         items.push(item_impl(cx, None, struct_ty.clone(), hook_impl));
         items.push(item_impl(cx, Some(hook_path.clone()), struct_ty, get_wrapper));
     }, |_var, cx, span, _items| {
         cx.span_err(span, "Unexpected variable in hooks file");
+    }, |_base, _cx, _span, _items, _vars, _funcs| {
+        // Do nothing
     })
 }
 
 // Taken from regex_macros package, all credit to them
 fn parse(cx: &mut ExtCtxt, tts: &[TokenTree]) -> Option<String> {
     let mut parser = cx.new_parser_from_tts(tts);
-    let entry = cx.expander().fold_expr(parser.parse_expr());
+    let entry = {
+        let expr = match parser.parse_expr() {
+            Ok(e) => e,
+            Err(mut diag) => {
+                diag.emit();
+                return None;
+            }
+        };
+        cx.expander().fold_expr(expr)
+    };
     let filename = match entry.node {
         ast::ExprLit(ref lit) => {
             match lit.node {
@@ -549,7 +623,7 @@ fn parse(cx: &mut ExtCtxt, tts: &[TokenTree]) -> Option<String> {
             return None
         }
     };
-    if !parser.eat(&token::Eof).ok().unwrap() {
+    if !parser.eat(&token::Eof) {
         cx.span_err(parser.span, "only one string literal allowed");
         return None;
     }

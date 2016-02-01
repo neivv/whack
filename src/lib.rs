@@ -1,4 +1,4 @@
-#![feature(libc, link_args, wrapping, asm)]
+#![feature(libc, link_args, asm)]
 #[link_args = "-static-libgcc"]
 extern {}
 extern crate libc;
@@ -8,7 +8,6 @@ extern crate winapi;
 use PatchHistory::*;
 use std::{ops, mem};
 use std::marker::PhantomData;
-use std::num::wrapping::OverflowingOps;
 
 mod platform;
 
@@ -65,6 +64,17 @@ impl PatchManager {
             });
         });
     }
+
+    /// Hackish way to support weird calling conventions that some callbacks may require.
+    /// (Or fastcall ._.)
+    pub fn callback_hook<Hook>(&mut self, _hook: Hook, target: Hook::Target) -> *const u8
+    where Hook: HookableAsmWrap {
+        let mut patch = Patch {
+            parent: self,
+            base: 0,
+        };
+        unsafe { mem::transmute(patch.make_hook_wrapper::<Hook>(target)) }
+    }
 }
 
 pub struct Patch<'a> {
@@ -80,14 +90,15 @@ pub struct PatchWithBase<'a> {
 impl<'a> Patch<'a> {
     pub unsafe fn hook<Hook>(&mut self, _hook: Hook, target: Hook::Target) where Hook: HookableAsmWrap {
         let data = self.make_hook_wrapper::<Hook>(target);
-        platform::jump_hook(Hook::address(), mem::transmute(data));
+        let diff = self.base.overflowing_sub(Hook::expected_base()).0;
+        let src = Hook::address().overflowing_add(diff).0;
+        platform::jump_hook(src, mem::transmute(data));
     }
 
     unsafe fn make_hook_wrapper<Hook>(&mut self, target: Hook::Target) -> *mut u8 where
         Hook: HookableAsmWrap
     {
-        let diff = self.base.overflowing_sub(Hook::expected_base()).0;
-        let mut hook_ptr: *mut u8 = mem::transmute(mem::transmute::<_, usize>(&target).overflowing_add(diff).0);
+        let mut hook_ptr: *mut u8 = mem::transmute(&target);
         let mut code = Hook::get_hook_wrapper();
         let mut code_size = 0;
         while *code != 0xcc { code = code.offset(1); }
@@ -121,7 +132,9 @@ impl<'a> Patch<'a> {
 
     pub unsafe fn call_hook<Hook>(&mut self, _hook: Hook, target: Hook::Target) where Hook: HookableAsmWrap {
         let data = self.make_hook_wrapper::<Hook>(target);
-        platform::call_hook(Hook::address(), mem::transmute(data), &mut self.parent.exec_heap);
+        let diff = self.base.overflowing_sub(Hook::expected_base()).0;
+        let src = Hook::address().overflowing_add(diff).0;
+        platform::call_hook(src, mem::transmute(data), &mut self.parent.exec_heap);
     }
 
     fn alloc_exec(&mut self, size: usize) -> *mut u8 {
