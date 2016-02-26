@@ -24,7 +24,7 @@ use std::fmt::Write;
 use std::fs;
 use std::io::Read;
 
-use nuottei::{ParseResult, Stack, Register};
+use nuottei::{Declaration, Stack, Register};
 
 #[plugin_registrar]
 pub fn plugin_registrar(reg: &mut Registry) {
@@ -38,8 +38,8 @@ fn unit_ty(cx: &ExtCtxt, sp: Span) -> P<ast::Ty> {
 
 fn to_rust_type(cx: &ExtCtxt, sp: Span, input: &nuottei::Type, default_ty: Option<P<ast::Ty>>) -> Option<P<ast::Ty>> {
     match *input {
-        nuottei::Type::Basic(ref name) => {
-            Some(match name.as_str() {
+        nuottei::Type::Basic(name) => {
+            Some(match name {
                 "dword" => quote_ty!(cx, u32),
                 "int" => quote_ty!(cx, i32),
                 "word" => quote_ty!(cx, u16),
@@ -141,7 +141,7 @@ fn add_stack_args(cx: &ExtCtxt, sp: Span, func: &nuottei::Function, stmts: &mut 
 fn returns_something(func: &nuottei::Function) -> bool {
     match func.ret_type {
         nuottei::Type::Default => false,
-        nuottei::Type::Basic(ref s) => s != "void",
+        nuottei::Type::Basic(s) => s != "void",
         _ => true,
     }
 }
@@ -192,7 +192,7 @@ fn generate_asm_code(func: &nuottei::Function, target_reg: &str) -> InternedStri
         write!(result, "subl $${}, %esp\n", stack_arg_amt * 4).unwrap();
     }
     write!(result, "calll *%{}\n", target_reg).unwrap();
-    if stack_arg_amt != 0 && func.attrs.iter().find(|s| *s == "cdecl").is_some() {
+    if stack_arg_amt != 0 && func.attrs.iter().find(|&&s| s == "cdecl").is_some() {
         write!(result, "addl $${}, %esp\n", stack_arg_amt * 4).unwrap();
     }
     token::intern_and_get_ident(&result)
@@ -221,8 +221,8 @@ fn make_body(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> P<ast::Blo
     statements.push(cx.stmt_expr(asm_expr));
     let ret_expr = match func.ret_type {
         nuottei::Type::Default => None,
-        nuottei::Type::Basic(ref s) if s == "void" => None,
-        nuottei::Type::Basic(ref s) if s == "bool" => Some(quote_expr!(cx, ret != 0)),
+        nuottei::Type::Basic(s) if s == "void" => None,
+        nuottei::Type::Basic(s) if s == "bool" => Some(quote_expr!(cx, ret != 0)),
         _ => Some(expr_transmute_id(cx, sp, "ret"))
     };
     cx.block(sp, statements, ret_expr)
@@ -295,7 +295,7 @@ fn hook_impl(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> Vec<P<ast:
         }
         stack_pos += 1;
     }
-    let stack_size = match func.attrs.iter().find(|x| *x == "cdecl").is_some() {
+    let stack_size = match func.attrs.iter().find(|&&x| x == "cdecl").is_some() {
         true => 0,
         false => func.args.iter().filter(|a| a.location.stack().is_some()).count(),
     };
@@ -407,7 +407,7 @@ fn parse_file<Func, Var, Section>(cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]
                                  ) -> Box<MacResult + 'static>
 where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>, u64),
       Var: FnMut(nuottei::Variable, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>),
-      Section: FnMut(u64, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>, &Vec<(String, usize)>, &Vec<(String, usize)>) {
+      Section: FnMut(u64, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>, &Vec<(&str, usize)>, &Vec<(&str, usize)>) {
     let filename = match parse(cx, args) {
         Some(f) => f,
         None => return DummyResult::any(sp),
@@ -436,7 +436,7 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
 
     let mut filemap_pos = filemap.start_pos;
     let mut items = Vec::new();
-    let mut current_section = String::new();
+    let mut current_section = "";
     let mut current_base = 0;
     let mut sections = Vec::new();
     // For generating base addr init funs
@@ -454,17 +454,17 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
             hi: filemap_pos + Pos::from_usize(line.len()),
             expn_id: cx.backtrace
         };
-        match nuottei::parse_line(line, nuottei::DefaultMutability::None) {
-            Ok(ParseResult::Function(func)) => {
+        match nuottei::parse_line(line, &nuottei::ParseSettings::loose()) {
+            Ok(Declaration::Function(func)) => {
                 funcs.push((func.name.clone(), func.address as usize));
                 handle_func(func, cx, span, &mut items, current_base);
             }
-            Ok(ParseResult::Variable(var)) => {
+            Ok(Declaration::Variable(var)) => {
                 vars.push((var.name.clone(), var.address as usize));
                 handle_var(var, cx, span, &mut items);
             }
-            Ok(ParseResult::Nothing) => (),
-            Ok(ParseResult::Section(name, base)) => {
+            Ok(Declaration::Comment(_)) => (),
+            Ok(Declaration::Section(sect)) => {
                 // FIXME? Could just have items be in root namespace
                 if current_section == "" {
                     if items.len() > 1 {
@@ -473,7 +473,7 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
                 } else {
                     // FIXME: Incorrect span
                     section_end(current_base, cx, span, &mut items, &vars, &funcs);
-                    sections.push(item_pub(span, cx.ident_of(&current_section),
+                    sections.push(item_pub(span, cx.ident_of(current_section),
                                            vec!(quote_attr!(cx, #[allow(non_snake_case)])),
                                            ast::ItemMod(ast::Mod {
                                                inner: span,
@@ -485,12 +485,12 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
                     node: ast::ViewPathGlob(super_path.clone()),
                     span: DUMMY_SP,
                 })));
-                current_section = name;
-                current_base = base.unwrap_or(current_base);
+                current_section = sect.name;
+                current_base = sect.base.unwrap_or(current_base);
                 funcs.clear();
                 vars.clear();
             }
-            Err(desc) => cx.span_err(span, &desc),
+            Err((err, _)) => cx.span_err(span, &err.description),
         }
         filemap_pos = filemap_pos + Pos::from_usize(line.len() + 1);
         filemap.next_line(filemap_pos);
@@ -502,7 +502,7 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
     } else {
         // FIXME: Incorrect span
         section_end(current_base, cx, DUMMY_SP, &mut items, &vars, &funcs);
-        sections.push(item_pub(DUMMY_SP, cx.ident_of(&current_section),
+        sections.push(item_pub(DUMMY_SP, cx.ident_of(current_section),
                                vec!(quote_attr!(cx, #[allow(non_snake_case)])),
                                ast::ItemMod(ast::Mod {
                                    inner: DUMMY_SP,
@@ -514,10 +514,12 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
 
 /// Generates code for `init_module_vars()`, setting addresses of variables and
 /// functions to correct values
-fn init_module_body(cx: &mut ExtCtxt, vars: &Vec<(String, usize)>, funcs: &Vec<(String, usize)>, base: usize) -> P<ast::Block> {
+fn init_module_body<'a, I, J>(cx: &mut ExtCtxt, vars: I, funcs: J, base: usize) -> P<ast::Block>
+where I: Iterator<Item=&'a (&'a str, usize)>,
+      J: Iterator<Item=&'a (&'a str, usize)>, {
     let mut statements = Vec::new();
     statements.push(quote_stmt!(cx, let base: usize = ::std::mem::transmute(ptr);).unwrap());
-    for var in vars.iter() {
+    for var in vars {
         let offset = var.1 - base;
         let field_expr = cx.expr(DUMMY_SP, ast::ExprField(cx.expr_ident(DUMMY_SP, cx.ident_of(&var.0)), Spanned {
             node: cx.ident_of("address"),
@@ -527,7 +529,7 @@ fn init_module_body(cx: &mut ExtCtxt, vars: &Vec<(String, usize)>, funcs: &Vec<(
                                    quote_expr!(cx, base + $offset));
         statements.push(cx.stmt_expr(cx.expr(DUMMY_SP, expr)));
     }
-    for func in funcs.iter() {
+    for func in funcs {
         let offset = func.1 - base;
         let path = cx.path(DUMMY_SP, vec!(cx.ident_of("func_addr"), cx.ident_of(&func.0)));
         let expr = ast::ExprAssign(cx.expr_path(path), quote_expr!(cx, base + $offset));
@@ -537,8 +539,9 @@ fn init_module_body(cx: &mut ExtCtxt, vars: &Vec<(String, usize)>, funcs: &Vec<(
 }
 
 /// Generates static variables containing function addresses
-fn make_func_addrs(cx: &mut ExtCtxt, funcs: &Vec<(String, usize)>) -> Vec<P<ast::Item>> {
-    funcs.iter().map(|&(ref name, _)| {
+fn make_func_addrs<'a, I>(cx: &mut ExtCtxt, funcs: I) -> Vec<P<ast::Item>>
+where I: Iterator<Item=&'a (&'a str, usize)> {
+    funcs.map(|&(ref name, _)| {
         item_pub(DUMMY_SP, cx.ident_of(&name), vec!(), ast::ItemStatic(quote_ty!(cx, usize), ast::MutMutable, quote_expr!(cx, !0)))
     }).collect()
 }
@@ -560,8 +563,8 @@ fn generate_from_txt(cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacR
         };
     }, |base, cx, span, items, vars, funcs| {
         let input = cx.arg(span, cx.ident_of("ptr"), quote_ty!(cx, *const ::std::os::raw::c_void));
-        let body = init_module_body(cx, vars, funcs, base as usize);
-        let func_addrs = make_func_addrs(cx, funcs);
+        let body = init_module_body(cx, vars.iter(), funcs.iter(), base as usize);
+        let func_addrs = make_func_addrs(cx, funcs.iter());
         items.push(item_pub_fn(cx, span, cx.ident_of("init_module_vars"), vec!(input), unit_ty(cx, span), body));
         items.push(cx.item(DUMMY_SP, cx.ident_of("func_addr"), vec!(),
                                ast::ItemMod(ast::Mod {
