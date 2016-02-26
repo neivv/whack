@@ -6,7 +6,7 @@ extern crate rustc_plugin;
 extern crate syntax;
 
 use syntax::codemap::{DUMMY_SP, Span, Spanned, Pos};
-use syntax::ast::{self, TokenTree};
+use syntax::ast::{self, ExprKind, ItemKind, TokenTree, TyKind};
 use syntax::ext::build::AstBuilder;
 use syntax::ext::base::{ExtCtxt, MacResult, DummyResult, MacEager};
 use syntax::parse::token::{self, InternedString};
@@ -14,7 +14,7 @@ use syntax::print::pprust;
 use syntax::util::small_vector::SmallVector;
 use syntax::fold::Folder;
 use syntax::ptr::P;
-use syntax::abi;
+use syntax::abi::Abi;
 use rustc_plugin::Registry;
 
 use std::default::Default;
@@ -33,7 +33,7 @@ pub fn plugin_registrar(reg: &mut Registry) {
 }
 
 fn unit_ty(cx: &ExtCtxt, sp: Span) -> P<ast::Ty> {
-    cx.ty(sp, ast::TyTup(Vec::new()))
+    cx.ty(sp, TyKind::Tup(Vec::new()))
 }
 
 fn to_rust_type(cx: &ExtCtxt, sp: Span, input: &nuottei::Type, default_ty: Option<P<ast::Ty>>) -> Option<P<ast::Ty>> {
@@ -51,9 +51,9 @@ fn to_rust_type(cx: &ExtCtxt, sp: Span, input: &nuottei::Type, default_ty: Optio
             })
         }
         nuottei::Type::Pointer(mutable, ref inner) => to_rust_type(cx, sp, inner, default_ty)
-            .map(|t| cx.ty_ptr(sp, t, if mutable { ast::MutMutable } else { ast::MutImmutable })),
+            .map(|t| cx.ty_ptr(sp, t, if mutable { ast::Mutability::Mutable } else { ast::Mutability::Immutable })),
         nuottei::Type::Array(size, ref inner) => to_rust_type(cx, sp, inner, default_ty)
-            .map(|t| cx.ty(sp, ast::TyFixedLengthVec(t, cx.expr_usize(sp, size as usize)))),
+            .map(|t| cx.ty(sp, TyKind::FixedLengthVec(t, cx.expr_usize(sp, size as usize)))),
         nuottei::Type::Default => default_ty,
     }
 }
@@ -70,21 +70,21 @@ fn make_inputs(cx: &ExtCtxt, sp: Span, func: &nuottei::Function) -> Vec<ast::Arg
     }).collect()
 }
 
-fn unsafe_block(sp: Span, stmts: Vec<P<ast::Stmt>>, expr: Option<P<ast::Expr>>) -> P<ast::Block> {
+fn unsafe_block(sp: Span, stmts: Vec<ast::Stmt>, expr: Option<P<ast::Expr>>) -> P<ast::Block> {
     P(ast::Block {
         stmts: stmts,
         expr: expr,
         id: ast::DUMMY_NODE_ID,
-        rules: ast::UnsafeBlock(ast::CompilerGenerated), // Not sure about CompilerGenerated
+        rules: ast::BlockCheckMode::Unsafe(ast::CompilerGenerated), // Not sure about CompilerGenerated
         span: sp,
     })
 }
 
 fn make_asm(cx: &ExtCtxt, sp: Span, asm: InternedString, outputs: Vec<(InternedString, P<ast::Expr>)>,
     inputs: Vec<(InternedString, P<ast::Expr>)>, clobbers: Vec<InternedString>) -> P<ast::Expr> {
-    cx.expr(sp, ast::ExprInlineAsm(ast::InlineAsm {
+    cx.expr(sp, ExprKind::InlineAsm(ast::InlineAsm {
         asm: asm,
-        asm_str_style: ast::StrStyle::CookedStr,
+        asm_str_style: ast::StrStyle::Cooked,
         outputs: outputs.into_iter().map(|tp| ast::InlineAsmOutput {
             constraint: tp.0,
             expr: tp.1,
@@ -109,7 +109,7 @@ fn expr_transmute_id(cx: &ExtCtxt, sp: Span, in_name: &str) -> P<ast::Expr> {
     expr_transmute(cx, sp, cx.expr_ident(sp, cx.ident_of(in_name)))
 }
 
-fn add_stack_args(cx: &ExtCtxt, sp: Span, func: &nuottei::Function, stmts: &mut Vec<P<ast::Stmt>>) {
+fn add_stack_args(cx: &ExtCtxt, sp: Span, func: &nuottei::Function, stmts: &mut Vec<ast::Stmt>) {
     if !func.args.iter().any(|a| a.location.stack().is_some()) {
         return;
     }
@@ -132,7 +132,7 @@ fn add_stack_args(cx: &ExtCtxt, sp: Span, func: &nuottei::Function, stmts: &mut 
         let right = expr_transmute_id(cx, sp, &arg_name(arg));
         stmts.push(cx.stmt_expr(P(ast::Expr {
             id: ast::DUMMY_NODE_ID,
-            node: ast::ExprAssign(left, right),
+            node: ExprKind::Assign(left, right),
             span: sp,
             attrs: None,
         })));
@@ -210,7 +210,7 @@ fn make_body(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> P<ast::Blo
     let target_id = cx.ident_of("_target");
     let path = cx.path(DUMMY_SP, vec!(cx.ident_of("func_addr"), cx.ident_of(&func.name)));
     let addr = cx.expr_path(path);
-    statements.push(cx.stmt_let_typed(sp, true, target_id, quote_ty!(cx, usize), addr));
+    statements.push(cx.stmt_let_typed(sp, true, target_id, quote_ty!(cx, usize), addr).unwrap());
     input.push((token::intern_and_get_ident(&format!("{{{}}}", target_reg)), cx.expr_ident(sp, target_id)));
     if target_reg == "ecx" {
         clob.retain(|n| n.find("ecx").is_none());
@@ -229,23 +229,23 @@ fn make_body(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> P<ast::Blo
     cx.block(sp, statements, ret_expr)
 }
 
-fn item_pub(sp: Span, name: ast::Ident, attrs: Vec<ast::Attribute>, node: ast::Item_) -> P<ast::Item> {
+fn item_pub(sp: Span, name: ast::Ident, attrs: Vec<ast::Attribute>, node: ItemKind) -> P<ast::Item> {
     P(ast::Item {
         ident: name,
         attrs: attrs,
         id: ast::DUMMY_NODE_ID,
         node: node,
-        vis: ast::Public,
+        vis: ast::Visibility::Public,
         span: sp
     })
 }
 
 fn item_pub_fn(cx: &ExtCtxt, sp: Span, name: ast::Ident, inputs: Vec<ast::Arg>, output: P<ast::Ty>, body: P<ast::Block>) -> P<ast::Item> {
     item_pub(sp, name, vec!(),
-             ast::ItemFn(cx.fn_decl(inputs, output),
+             ItemKind::Fn(cx.fn_decl(inputs, output),
                          ast::Unsafety::Unsafe,
                          ast::Constness::NotConst,
-                         abi::Rust,
+                         Abi::Rust,
                          Default::default(),
                          body))
 }
@@ -269,7 +269,7 @@ fn static_method_sig(inputs: Vec<ast::Arg>, output: ast::FunctionRetTy) -> ast::
     ast::MethodSig {
         unsafety: ast::Unsafety::Normal,
         constness: ast::Constness::NotConst,
-        abi: ::syntax::abi::Abi::Rust,
+        abi: Abi::Rust,
         decl: P(ast::FnDecl {
             inputs: inputs,
             output: output,
@@ -277,13 +277,13 @@ fn static_method_sig(inputs: Vec<ast::Arg>, output: ast::FunctionRetTy) -> ast::
         }),
         generics: Default::default(),
         explicit_self: Spanned {
-            node: ast::SelfStatic,
+            node: ast::SelfKind::Static,
             span: DUMMY_SP,
         },
     }
 }
 
-fn hook_impl(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> Vec<P<ast::ImplItem>> {
+fn hook_impl(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> Vec<ast::ImplItem> {
     let mut asm_code = "int3\n".to_string();
     let mut stack_pos = 0usize;
     for arg in func.args.iter().rev() {
@@ -305,26 +305,26 @@ fn hook_impl(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> Vec<P<ast:
     write!(asm_code, "addl $${}, %esp\n", arg_count * mem::size_of::<usize>()).unwrap();
     write!(asm_code, "retl $${}", stack_size * mem::size_of::<usize>()).unwrap();
     let asm_expr = make_asm(cx, sp, token::intern_and_get_ident(&asm_code), vec!(), vec!(), vec!());
-    let sig = static_method_sig(vec!(), ast::DefaultReturn(sp));
+    let sig = static_method_sig(vec!(), ast::FunctionRetTy::Default(sp));
     let block = cx.block(sp, vec!(),
         Some(cx.expr_block(unsafe_block(sp, vec!(cx.stmt_expr(asm_expr)), None))));
-    let asm_code_fn = P(ast::ImplItem {
+    let asm_code_fn = ast::ImplItem {
         id: ast::DUMMY_NODE_ID,
         ident: cx.ident_of("__asm_code"),
-        vis: ast::Inherited,
+        vis: ast::Visibility::Inherited,
         attrs: vec!(),
         node: ast::ImplItemKind::Method(sig, block),
         span: sp,
-    });
+    };
     vec!(asm_code_fn)
 }
 
-fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expected_base: usize) -> Vec<P<ast::ImplItem>> {
-    let output = ast::Return(quote_ty!(cx, *const u8));
+fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expected_base: usize) -> Vec<ast::ImplItem> {
+    let output = ast::FunctionRetTy::Ty(quote_ty!(cx, *const u8));
     let sig = ast::MethodSig {
         unsafety: ast::Unsafety::Unsafe,
         constness: ast::Constness::NotConst,
-        abi: ::syntax::abi::Abi::Rust,
+        abi: Abi::Rust,
         decl: P(ast::FnDecl {
             inputs: vec!(),
             output: output,
@@ -332,12 +332,12 @@ fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expect
         }),
         generics: Default::default(),
         explicit_self: Spanned {
-            node: ast::SelfStatic,
+            node: ast::SelfKind::Static,
             span: sp,
         },
     };
-    let addr_sig = static_method_sig(vec!(), ast::Return(quote_ty!(cx, usize)));
-    let expected_base_sig = static_method_sig(vec!(), ast::Return(quote_ty!(cx, usize)));
+    let addr_sig = static_method_sig(vec!(), ast::FunctionRetTy::Ty(quote_ty!(cx, usize)));
+    let expected_base_sig = static_method_sig(vec!(), ast::FunctionRetTy::Ty(quote_ty!(cx, usize)));
     let asm_code_stmt = quote_stmt!(cx, let addr: *const *const u8 = ::std::mem::transmute(&Self::__asm_code)).unwrap();
     let asm_expr = quote_expr!(cx, *addr);
 
@@ -345,53 +345,32 @@ fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expect
     let addr = func.address as usize;
     let addr_block = cx.block(sp, vec!(), Some(quote_expr!(cx, $addr)));
     let expected_base_block = cx.block(sp, vec!(), Some(quote_expr!(cx, $expected_base)));
-    let get_wrapper = P(ast::ImplItem {
+    let impl_item = |name, node| ast::ImplItem {
         id: ast::DUMMY_NODE_ID,
-        ident: cx.ident_of("get_hook_wrapper"),
-        vis: ast::Inherited,
+        ident: cx.ident_of(name),
+        vis: ast::Visibility::Inherited,
         attrs: vec!(),
-        node: ast::ImplItemKind::Method(sig, block),
+        node: node,
         span: sp,
-    });
-    let address = P(ast::ImplItem {
-        id: ast::DUMMY_NODE_ID,
-        ident: cx.ident_of("address"),
-        vis: ast::Inherited,
-        attrs: vec!(),
-        node: ast::ImplItemKind::Method(addr_sig, addr_block),
-        span: sp,
-    });
-    let expected_base = P(ast::ImplItem {
-        id: ast::DUMMY_NODE_ID,
-        ident: cx.ident_of("expected_base"),
-        vis: ast::Inherited,
-        attrs: vec!(),
-        node: ast::ImplItemKind::Method(expected_base_sig, expected_base_block),
-        span: sp,
-    });
-    let target_type = cx.ty(sp, ast::TyBareFn(P(ast::BareFnTy {
+    };
+    let get_wrapper = impl_item("get_hook_wrapper", ast::ImplItemKind::Method(sig, block));
+    let address = impl_item("address", ast::ImplItemKind::Method(addr_sig, addr_block));
+    let expected_base = impl_item("expected_base",
+                                  ast::ImplItemKind::Method(expected_base_sig, expected_base_block));
         unsafety: ast::Unsafety::Unsafe,
-        abi: abi::Abi::C,
+        abi: Abi::C,
         lifetimes: vec!(),
         decl: P(ast::FnDecl {
             inputs: make_inputs(cx, sp, func),
-            output: ast::Return(to_rust_type(cx, sp, &func.ret_type, Some(unit_ty(cx, sp))).unwrap()),
+            output: ast::FunctionRetTy::Ty(to_rust_type(cx, sp, &func.ret_type, Some(unit_ty(cx, sp))).unwrap()),
             variadic: false,
         }),
     })));
-    let target_type_impl = P(ast::ImplItem {
-        id: ast::DUMMY_NODE_ID,
-        ident: cx.ident_of("Target"),
-        vis: ast::Inherited,
-        attrs: vec!(),
-        node: ast::ImplItemKind::Type(target_type),
-        span: sp,
-    });
     vec!(get_wrapper, address, expected_base, target_type_impl)
 }
 
-fn item_impl(cx: &mut ExtCtxt, trait_path: Option<ast::Path>, struct_ty: P<ast::Ty>, items: Vec<P<ast::ImplItem>>) -> P<ast::Item> {
-    cx.item(DUMMY_SP, cx.ident_of(""), vec!(), ast::ItemImpl(
+fn item_impl(cx: &mut ExtCtxt, trait_path: Option<ast::Path>, struct_ty: P<ast::Ty>, items: Vec<ast::ImplItem>) -> P<ast::Item> {
+    cx.item(DUMMY_SP, cx.ident_of(""), vec!(), ItemKind::Impl(
         ast::Unsafety::Normal,
         ast::ImplPolarity::Positive,
         Default::default(),
@@ -445,7 +424,7 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
     let mut vars = Vec::new();
 
     let super_path = cx.path(DUMMY_SP, vec!(cx.ident_of("super")));
-    items.push(cx.item_use(DUMMY_SP, ast::Inherited, P(ast::ViewPath {
+    items.push(cx.item_use(DUMMY_SP, ast::Visibility::Inherited, P(ast::ViewPath {
         node: ast::ViewPathGlob(super_path.clone()),
         span: DUMMY_SP,
     })));
@@ -476,13 +455,13 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
                     section_end(current_base, cx, span, &mut items, &vars, &funcs);
                     sections.push(item_pub(span, cx.ident_of(current_section),
                                            vec!(quote_attr!(cx, #[allow(non_snake_case)])),
-                                           ast::ItemMod(ast::Mod {
+                                           ItemKind::Mod(ast::Mod {
                                                inner: span,
                                                items: items,
                                            })));
                 }
                 items = Vec::new();
-                items.push(cx.item_use(DUMMY_SP, ast::Inherited, P(ast::ViewPath {
+                items.push(cx.item_use(DUMMY_SP, ast::Visibility::Inherited, P(ast::ViewPath {
                     node: ast::ViewPathGlob(super_path.clone()),
                     span: DUMMY_SP,
                 })));
@@ -505,7 +484,7 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
         section_end(current_base, cx, DUMMY_SP, &mut items, &vars, &funcs);
         sections.push(item_pub(DUMMY_SP, cx.ident_of(current_section),
                                vec!(quote_attr!(cx, #[allow(non_snake_case)])),
-                               ast::ItemMod(ast::Mod {
+                               ItemKind::Mod(ast::Mod {
                                    inner: DUMMY_SP,
                                    items: items,
                                })));
@@ -522,18 +501,18 @@ where I: Iterator<Item=&'a (&'a str, usize)>,
     statements.push(quote_stmt!(cx, let base: usize = ::std::mem::transmute(ptr);).unwrap());
     for var in vars {
         let offset = var.1 - base;
-        let field_expr = cx.expr(DUMMY_SP, ast::ExprField(cx.expr_ident(DUMMY_SP, cx.ident_of(&var.0)), Spanned {
+        let field_expr = cx.expr(DUMMY_SP, ExprKind::Field(cx.expr_ident(DUMMY_SP, cx.ident_of(&var.0)), Spanned {
             node: cx.ident_of("address"),
             span: DUMMY_SP,
         }));
-        let expr = ast::ExprAssign(field_expr,
+        let expr = ExprKind::Assign(field_expr,
                                    quote_expr!(cx, base + $offset));
         statements.push(cx.stmt_expr(cx.expr(DUMMY_SP, expr)));
     }
     for func in funcs {
         let offset = func.1 - base;
         let path = cx.path(DUMMY_SP, vec!(cx.ident_of("func_addr"), cx.ident_of(&func.0)));
-        let expr = ast::ExprAssign(cx.expr_path(path), quote_expr!(cx, base + $offset));
+        let expr = ExprKind::Assign(cx.expr_path(path), quote_expr!(cx, base + $offset));
         statements.push(cx.stmt_expr(cx.expr(DUMMY_SP, expr)));
     }
     cx.block(DUMMY_SP, statements, None)
@@ -543,7 +522,8 @@ where I: Iterator<Item=&'a (&'a str, usize)>,
 fn make_func_addrs<'a, I>(cx: &mut ExtCtxt, funcs: I) -> Vec<P<ast::Item>>
 where I: Iterator<Item=&'a (&'a str, usize)> {
     funcs.map(|&(ref name, _)| {
-        item_pub(DUMMY_SP, cx.ident_of(&name), vec!(), ast::ItemStatic(quote_ty!(cx, usize), ast::MutMutable, quote_expr!(cx, !0)))
+        let node = ItemKind::Static(quote_ty!(cx, usize), ast::Mutability::Mutable, quote_expr!(cx, !0));
+        item_pub(DUMMY_SP, cx.ident_of(&name), vec!(), node)
     }).collect()
 }
 
@@ -556,7 +536,8 @@ fn generate_from_txt(cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacR
     }, |var, cx, span, items| {
         match ty_expr_from_var(cx, span, &var) {
             Some((ty, expr)) => {
-                items.push(item_pub(span, cx.ident_of(&var.name), vec!(), ast::ItemStatic(ty, ast::MutMutable, expr)));
+                let node = ItemKind::Static(ty, ast::Mutability::Mutable, expr);
+                items.push(item_pub(span, cx.ident_of(&var.name), vec!(), node));
             }
             None => {
                 cx.span_err(span, &format!("Variable {} does not have a type", var.name));
@@ -568,7 +549,7 @@ fn generate_from_txt(cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacR
         let func_addrs = make_func_addrs(cx, funcs.iter());
         items.push(item_pub_fn(cx, span, cx.ident_of("init_module_vars"), vec!(input), unit_ty(cx, span), body));
         items.push(cx.item(DUMMY_SP, cx.ident_of("func_addr"), vec!(),
-                               ast::ItemMod(ast::Mod {
+                               ItemKind::Mod(ast::Mod {
                                    inner: DUMMY_SP,
                                    items: func_addrs,
                                })));
@@ -582,7 +563,7 @@ fn generate_hooks(cx: &mut ExtCtxt, sp: Span, args: &[TokenTree]) -> Box<MacResu
         let hook_impl = hook_impl(cx, span, &func);
         let get_wrapper = hook_get_wrapper(cx, span, &func, base as usize);
         items.push(item_pub(span, cx.ident_of(&func.name), vec!(),
-                            ast::ItemStruct(
+                            ItemKind::Struct(
                                 ast::VariantData::Unit(ast::DUMMY_NODE_ID),
                                 Default::default())));
 
@@ -609,9 +590,9 @@ fn parse(cx: &mut ExtCtxt, tts: &[TokenTree]) -> Option<String> {
         cx.expander().fold_expr(expr)
     };
     let filename = match entry.node {
-        ast::ExprLit(ref lit) => {
+        ExprKind::Lit(ref lit) => {
             match lit.node {
-                ast::LitStr(ref s, _) => s.to_string(),
+                ast::LitKind::Str(ref s, _) => s.to_string(),
                 _ => {
                     cx.span_err(entry.span, &format!(
                         "expected string literal but got `{}`",
