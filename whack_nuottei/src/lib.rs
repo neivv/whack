@@ -418,6 +418,7 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
     let mut items = Vec::new();
     let mut current_section = "";
     let mut current_base = 0;
+    let mut current_section_span = DUMMY_SP;
     let mut sections = Vec::new();
     // For generating base addr init funs
     let mut funcs = Vec::new();
@@ -451,12 +452,11 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
                         cx.span_err(span, "No section before first entry");
                     }
                 } else {
-                    // FIXME: Incorrect span
-                    section_end(current_base, cx, span, &mut items, &vars, &funcs);
-                    sections.push(item_pub(span, cx.ident_of(current_section),
+                    section_end(current_base, cx, current_section_span, &mut items, &vars, &funcs);
+                    sections.push(item_pub(current_section_span, cx.ident_of(current_section),
                                            vec!(quote_attr!(cx, #[allow(non_snake_case)])),
                                            ItemKind::Mod(ast::Mod {
-                                               inner: span,
+                                               inner: current_section_span,
                                                items: items,
                                            })));
                 }
@@ -467,6 +467,7 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
                 })));
                 current_section = sect.name;
                 current_base = sect.base.unwrap_or(current_base);
+                current_section_span = span;
                 funcs.clear();
                 vars.clear();
             }
