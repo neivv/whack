@@ -60,7 +60,10 @@ fn to_rust_type(cx: &ExtCtxt, sp: Span, input: &nuottei::Type, default_ty: Optio
 
 // Because rust does not like static sharing name
 fn arg_name(arg: &nuottei::Arg) -> String {
-    format!("fn_arg_{}", arg.name)
+    match arg.location {
+        nuottei::Location::Stack(pos) => format!("fn_arg_s{}_{}", pos, arg.name),
+        nuottei::Location::Register(name) => format!("fn_arg_r{}_{}", name, arg.name),
+    }
 }
 
 fn make_inputs(cx: &ExtCtxt, sp: Span, func: &nuottei::Function) -> Vec<ast::Arg> {
@@ -283,7 +286,77 @@ fn static_method_sig(inputs: Vec<ast::Arg>, output: ast::FunctionRetTy) -> ast::
     }
 }
 
-fn hook_impl(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> Vec<ast::ImplItem> {
+fn make_opt_hook_intermediate(cx: &ExtCtxt, sp: Span, func: &nuottei::Function) -> ast::ImplItem {
+    // opt_hook_intermediate: (arg 1, arg 2, arg 3, ..., extern fn hook(), *mut u32 ok_and_value)
+    let args = func.args.iter().enumerate().map(|(arg_num, arg)| {
+            ast::Arg {
+                ty: to_rust_type(cx, sp, &arg.tp, Some(quote_ty!(cx, u32))).unwrap(),
+                pat: P(ast::Pat {
+                    id: ast::DUMMY_NODE_ID,
+                    node: {
+                        let binding_mode = ast::BindingMode::ByValue(ast::Mutability::Immutable);
+                        let ident = Spanned {
+                            node: cx.ident_of(&format!("a{}", arg_num)),
+                            span: sp,
+                        };
+                        ast::PatKind::Ident(binding_mode, ident, None)
+                    },
+                    span: sp,
+                }),
+                id: ast::DUMMY_NODE_ID,
+            }
+        })
+        // The actual hook function
+        .chain(Some(ast::Arg {
+            ty: opt_hook_target_func_type(cx, sp, func),
+            pat: quote_pat!(cx, hook),
+            id: ast::DUMMY_NODE_ID,
+        }))
+        // *mut u32 ok_and_value
+        .chain(Some(quote_arg!(cx, ok_and_value: *mut usize)))
+        .collect();
+    let sig = ast::MethodSig {
+        unsafety: ast::Unsafety::Unsafe,
+        abi: Abi::C,
+        .. static_method_sig(args, ast::FunctionRetTy::Default(sp))
+    };
+    // unsafe fn intermediate(..) {
+    //  let (ok, value) = match hook(..) {
+    //      Some(s) => (1, s as usize),
+    //      None => (0, 0)
+    //  };
+    //  *ok_and_value.offset(0) = ok;
+    //  *ok_and_value.offset(1) = value;
+    // }
+    let hook_call = {
+        let args = (0..func.args.len()).map(|arg_num| {
+            cx.expr_ident(sp, cx.ident_of(&format!("a{}", arg_num)))
+        }).collect();
+        let hook_call = cx.expr_call_ident(sp, cx.ident_of("hook"), args);
+        let arm_some = if func.ret_type == nuottei::Type::Default {
+            quote_arm!(cx, Some(_) => (1, 0),)
+        } else {
+            quote_arm!(cx, Some(s) => (1, s as usize),)
+        };
+        let arm_none = quote_arm!(cx, None => (0, 0),);
+        let match_expr = cx.expr_match(sp, hook_call, vec!(arm_some, arm_none));
+        cx.stmt_let(sp, false, cx.ident_of("ret"), match_expr)
+    };
+    let assign_ok = quote_stmt!(cx, *ok_and_value.offset(0) = ret.0;).unwrap();
+    let assign_val = quote_stmt!(cx, *ok_and_value.offset(1) = ret.1;).unwrap();
+    let block = cx.block(sp, vec!(hook_call, assign_ok, assign_val), None);
+
+    ast::ImplItem {
+        id: ast::DUMMY_NODE_ID,
+        ident: cx.ident_of("__opt_hook_intermediate"),
+        vis: ast::Visibility::Inherited,
+        attrs: vec!(),
+        node: ast::ImplItemKind::Method(sig, block),
+        span: sp,
+    }
+}
+
+fn hook_impl(cx: &ExtCtxt, sp: Span, func: &nuottei::Function) -> Vec<ast::ImplItem> {
     let mut asm_code = "int3\n".to_string();
     let mut stack_pos = 0usize;
     for arg in func.args.iter().rev() {
@@ -316,7 +389,62 @@ fn hook_impl(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> Vec<ast::I
         node: ast::ImplItemKind::Method(sig, block),
         span: sp,
     };
-    vec!(asm_code_fn)
+    vec!(asm_code_fn, make_opt_hook_intermediate(cx, sp, func))
+}
+
+fn gen_push_args_code(cx: &ExtCtxt, sp: Span, func: &nuottei::Function) -> P<ast::Block> {
+    let mut assembly = Vec::new();
+    {
+        let mut push_byte = |byte: u8| {
+            assembly.push(quote_expr!(cx, $byte));
+        };
+        for (count, arg) in func.args.iter().rev().enumerate() {
+            match arg.location {
+                nuottei::Location::Stack(pos) => {
+                    push_byte(0xff);
+                    push_byte(0x74);
+                    push_byte(0xe4);
+                    push_byte((0x30 + pos as usize * 4 + count * 4) as u8);
+                }
+                nuottei::Location::Register(reg) => {
+                    push_byte(match reg {
+                        "eax" => 0x50,
+                        "ecx" => 0x51,
+                        "edx" => 0x52,
+                        "ebx" => 0x53,
+                        // Needs to take the stack position into account.
+                        "esp" => unimplemented!(),
+                        "ebp" => 0x55,
+                        "esi" => 0x56,
+                        "edi" => 0x57,
+                        // Ideally would be checked earlier.
+                        _ => panic!("Invalid register {}", reg),
+                    });
+                }
+            }
+        }
+    }
+    let array = cx.expr(sp, ExprKind::Vec(assembly));
+    quote_block!(cx, {
+        const ARR: &'static [u8] = &$array;
+        ARR
+    })
+}
+
+fn opt_hook_target_func_type(cx: &ExtCtxt, sp: Span, func: &nuottei::Function) -> P<ast::Ty> {
+    cx.ty(sp, TyKind::BareFn(P(ast::BareFnTy {
+        unsafety: ast::Unsafety::Unsafe,
+        abi: Abi::Rust,
+        lifetimes: vec!(),
+        decl: P(ast::FnDecl {
+            inputs: make_inputs(cx, sp, func),
+            output: ast::FunctionRetTy::Ty({
+                let inner = to_rust_type(cx, sp, &func.ret_type, Some(unit_ty(cx, sp))).unwrap();
+                cx.ty_option(inner)
+            }),
+            variadic: false,
+        }),
+    })))
 }
 
 fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expected_base: usize) -> Vec<ast::ImplItem> {
@@ -338,13 +466,31 @@ fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expect
     };
     let addr_sig = static_method_sig(vec!(), ast::FunctionRetTy::Ty(quote_ty!(cx, usize)));
     let expected_base_sig = static_method_sig(vec!(), ast::FunctionRetTy::Ty(quote_ty!(cx, usize)));
-    let asm_code_stmt = quote_stmt!(cx, let addr: *const *const u8 = ::std::mem::transmute(&Self::__asm_code)).unwrap();
-    let asm_expr = quote_expr!(cx, *addr);
+    let stack_args_sig = static_method_sig(vec!(), ast::FunctionRetTy::Ty(quote_ty!(cx, usize)));
+    let arg_count_sig = static_method_sig(vec!(), ast::FunctionRetTy::Ty(quote_ty!(cx, usize)));
+    let push_args_sig = static_method_sig(vec!(), ast::FunctionRetTy::Ty(quote_ty!(cx, &'static [u8])));
+    let intermediate_sig = static_method_sig(vec!(), ast::FunctionRetTy::Ty(quote_ty!(cx, *mut u8)));
 
-    let block = cx.block(sp, vec!(asm_code_stmt), Some(asm_expr));
+    let block = quote_block!(cx, { Self::__asm_code as *const u8 });
     let addr = func.address as usize;
-    let addr_block = cx.block(sp, vec!(), Some(quote_expr!(cx, $addr)));
-    let expected_base_block = cx.block(sp, vec!(), Some(quote_expr!(cx, $expected_base)));
+    let (stack_args, all_args) = {
+        let arg_amt = func.args.len();
+        let stack_arg_amt = func.args.iter().filter(|a| a.location.stack().is_some()).count();
+        let is_cdecl = func.attrs.iter().find(|&&s| s == "cdecl").is_some();
+        if is_cdecl {
+            (0, arg_amt)
+        } else {
+            (stack_arg_amt, arg_amt)
+        }
+    };
+    let addr_block = quote_block!(cx, { $addr });
+    let expected_base_block = quote_block!(cx, { $expected_base });
+    let stack_args_block = quote_block!(cx, { $stack_args });
+    let arg_count_block = quote_block!(cx, { $all_args });
+    let push_args_block = gen_push_args_code(cx, sp, func);
+    let fn_name = cx.ident_of(&func.name);
+    let intermediate_block = quote_block!(cx, { $fn_name ::__opt_hook_intermediate as *mut u8 });
+
     let impl_item = |name, node| ast::ImplItem {
         id: ast::DUMMY_NODE_ID,
         ident: cx.ident_of(name),
@@ -357,6 +503,13 @@ fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expect
     let address = impl_item("address", ast::ImplItemKind::Method(addr_sig, addr_block));
     let expected_base = impl_item("expected_base",
                                   ast::ImplItemKind::Method(expected_base_sig, expected_base_block));
+    let stack_args_count = impl_item("stack_args_count",
+                                     ast::ImplItemKind::Method(stack_args_sig, stack_args_block));
+    let arg_count = impl_item("arg_count", ast::ImplItemKind::Method(arg_count_sig, arg_count_block));
+    let push_args = impl_item("opt_push_args_asm", ast::ImplItemKind::Method(push_args_sig, push_args_block));
+    let intermediate_fnptr = impl_item("opt_hook_intermediate",
+                                       ast::ImplItemKind::Method(intermediate_sig, intermediate_block));
+    let target_type = cx.ty(sp, TyKind::BareFn(P(ast::BareFnTy {
         unsafety: ast::Unsafety::Unsafe,
         abi: Abi::C,
         lifetimes: vec!(),
@@ -366,7 +519,11 @@ fn hook_get_wrapper(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function, expect
             variadic: false,
         }),
     })));
-    vec!(get_wrapper, address, expected_base, target_type_impl)
+    let target_type_impl = impl_item("Target", ast::ImplItemKind::Type(target_type));
+    let opt_target_type = opt_hook_target_func_type(cx, sp, func);
+    let opt_target_type_impl = impl_item("OptionalTarget", ast::ImplItemKind::Type(opt_target_type));
+    vec!(get_wrapper, address, expected_base, target_type_impl, opt_target_type_impl,
+         stack_args_count, arg_count, push_args, intermediate_fnptr)
 }
 
 fn item_impl(cx: &mut ExtCtxt, trait_path: Option<ast::Path>, struct_ty: P<ast::Ty>, items: Vec<ast::ImplItem>) -> P<ast::Item> {
@@ -488,8 +645,7 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
             cx.span_err(DUMMY_SP, "No section before first entry");
         }
     } else {
-        // FIXME: Incorrect span
-        section_end(current_base, cx, DUMMY_SP, &mut items, &vars, &funcs);
+        section_end(current_base, cx, current_section_span, &mut items, &vars, &funcs);
         sections.push(item_pub(DUMMY_SP, cx.ident_of(current_section),
                                vec!(quote_attr!(cx, #[allow(non_snake_case)])),
                                ItemKind::Mod(ast::Mod {

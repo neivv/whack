@@ -88,6 +88,8 @@ pub struct PatchWithBase<'a> {
 }
 
 impl<'a> Patch<'a> {
+
+    /// Hooks a function, replacing it with `target`.
     pub unsafe fn hook<Hook>(&mut self, _hook: Hook, target: Hook::Target) where Hook: HookableAsmWrap {
         let data = self.make_hook_wrapper::<Hook>(target);
         let diff = self.base.overflowing_sub(Hook::expected_base()).0;
@@ -130,11 +132,22 @@ impl<'a> Patch<'a> {
         data
     }
 
+    /// Hooks a piece of code. Unlike `hook`, this does not cause any original code
+    /// to not be executed.
     pub unsafe fn call_hook<Hook>(&mut self, _hook: Hook, target: Hook::Target) where Hook: HookableAsmWrap {
         let data = self.make_hook_wrapper::<Hook>(target);
         let diff = self.base.overflowing_sub(Hook::expected_base()).0;
         let src = Hook::address().overflowing_add(diff).0;
         platform::call_hook(src, mem::transmute(data), &mut self.parent.exec_heap);
+    }
+
+    /// Hooks a function, dynamically choosing between behaviours of `hook` and `call_hook`.
+    /// If the hook returns `Some(x)`, the original function is not run and `x` is returned,
+    /// while returning `None` causes the original function to be executed afterwards.
+    pub unsafe fn optional_hook<Hook>(&mut self, _hook: Hook, target: Hook::OptionalTarget) where Hook: HookableAsmWrap {
+        let diff = self.base.overflowing_sub(Hook::expected_base()).0;
+        let src = Hook::address().overflowing_add(diff).0;
+        platform::optional_hook::<_, Hook>(src, mem::transmute(&target), &mut self.parent.exec_heap);
     }
 
     fn alloc_exec(&mut self, size: usize) -> *mut u8 {
@@ -205,10 +218,32 @@ pub unsafe fn redirect_stderr(filename: &str) -> bool {
 }
 
 pub trait HookableAsmWrap {
-    type Target;
+    type Target; // extern "C" fn(a1_type, a2_type, ...) -> ret
+    type OptionalTarget; // fn(a1_type, a2_type, ...) -> Option<ret>
     unsafe fn get_hook_wrapper() -> *const u8;
+
+    // stdcall/etc args, cdecl returns 0
+    fn stack_args_count() -> usize;
+    // All args
+    fn arg_count() -> usize;
+    // Hook-specific code in platform::optional_hook
+    fn opt_push_args_asm() -> &'static [u8];
+    // Casted from the function pointer
+    fn opt_hook_intermediate() -> *mut u8;
+
     fn address() -> usize;
     fn expected_base() -> usize;
+}
+
+// This could also be just a vector that gets the dynamic parts of
+// actual hook address and intermediate address as input, but having
+// everything completely constant should be a bit faster
+pub struct OptHookWrapper {
+    // There is push dword hook_address instruction at beginning of asm wrapper
+    // placed in platform::optional_hook
+    pub call: &'static [u8],
+    pub intermediate_wrapper: *const u8,
+    pub exit: &'static [u8],
 }
 
 pub struct Variable<T> {
