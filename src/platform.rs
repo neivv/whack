@@ -114,11 +114,11 @@ unsafe fn x86_sib_ins_size(ins: *const u8) -> usize {
 
 unsafe fn x86_ins_size(ins: *const u8) -> usize {
     match *ins {
-        push_pop if push_pop >= 0x50 && push_pop < 0x62 => 1,
+        0x50 ... 0x62 => 1,
         0x68 => 5,
         n if n >= 0x84 && n < 0x90 => x86_sib_ins_size(ins),
         0x83 | 0xc6 => x86_sib_ins_size(ins) + 1,
-        0xe8 | 0xe9 => 5,
+        0xa1 | 0xb9 | 0xe8 | 0xe9 => 5,
         n => panic!("Unimpl ins size 0x{:x}", n),
     }
 }
