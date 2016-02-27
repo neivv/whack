@@ -394,9 +394,9 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
     };
     let mut full_filename = PathBuf::from(cx.codemap().span_to_filename(cx.expansion_cause()));
     full_filename.pop();
-    full_filename.push(filename.clone());
+    full_filename.push(&filename);
 
-    let text_contents = match fs::File::open(full_filename) {
+    let text_contents = match fs::File::open(&full_filename) {
         Ok(mut f) => {
             let mut text = String::new();
             if let Err(e) = f.read_to_string(&mut text) {
@@ -411,7 +411,14 @@ where Func: FnMut(nuottei::Function, &mut ExtCtxt, Span, &mut Vec<P<ast::Item>>,
         }
     };
 
-    let filemap = cx.codemap().new_filemap(filename, text_contents.clone());
+    let full_filename = match full_filename.into_os_string().into_string() {
+        Ok(o) => o,
+        Err(_) => {
+            cx.span_err(sp, "Strange characters in path");
+            return DummyResult::any(sp);
+        }
+    };
+    let filemap = cx.codemap().new_filemap(full_filename, text_contents.clone());
     filemap.next_line(filemap.start_pos);
 
     let mut filemap_pos = filemap.start_pos;
