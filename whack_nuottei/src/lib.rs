@@ -162,15 +162,11 @@ fn out_in_clobber(cx: &mut ExtCtxt, sp: Span, func: &nuottei::Function) -> (Vec<
                   cx.expr_ident(sp, cx.ident_of(&arg_name(a)))))
         .collect();
     let mut clobber = vec![InternedString::new("memory")];
-    if out.len() == 0 && !inputs.iter().any(|tp| tp.0.find("eax").is_some()) {
+    if out.len() == 0 {
         clobber.push(InternedString::new("eax"));
     }
-    if !inputs.iter().any(|tp| tp.0.find("ecx").is_some()) {
-        clobber.push(InternedString::new("ecx"));
-    }
-    if !inputs.iter().any(|tp| tp.0.find("edx").is_some()) {
-        clobber.push(InternedString::new("edx"));
-    }
+    clobber.push(InternedString::new("ecx"));
+    clobber.push(InternedString::new("edx"));
     (out, inputs, clobber)
 }
 
