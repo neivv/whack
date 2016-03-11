@@ -127,6 +127,7 @@ unsafe fn x86_ins_size(ins: *const u8) -> usize {
         0x68 => 5,
         0x84 ... 0x90 | 0xff => x86_sib_ins_size(ins),
         0x83 | 0xc6 => x86_sib_ins_size(ins) + 1,
+        0x81 => x86_sib_ins_size(ins) + 4,
         0xa1 | 0xb9 | 0xba | 0xe8 | 0xe9 => 5,
         n => panic!("Unimpl ins size 0x{:x}", n),
     }
