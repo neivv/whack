@@ -8,6 +8,7 @@ extern crate winapi;
 use PatchHistory::*;
 use std::{ops, mem};
 use std::marker::PhantomData;
+use std::path::Path;
 
 mod platform;
 
@@ -211,12 +212,12 @@ impl<T> ToPointer for *mut T {
     }
 }
 
-/// Redirects stderr to file.
-/// Accepts only ascii strings for filename to avoid unicode dependency.
-pub unsafe fn redirect_stderr(filename: &str) -> bool {
-    platform::redirect_stderr(filename)
+/// Redirects stderr to a file.
+pub unsafe fn redirect_stderr<F: AsRef<Path>>(filename: F) -> bool {
+    platform::redirect_stderr(filename.as_ref())
 }
 
+#[doc(hidden)]
 pub trait HookableAsmWrap {
     type Target; // extern "C" fn(a1_type, a2_type, ...) -> ret
     type OptionalTarget; // fn(a1_type, a2_type, ...) -> Option<ret>
@@ -238,6 +239,7 @@ pub trait HookableAsmWrap {
 // This could also be just a vector that gets the dynamic parts of
 // actual hook address and intermediate address as input, but having
 // everything completely constant should be a bit faster
+#[doc(hidden)]
 pub struct OptHookWrapper {
     // There is push dword hook_address instruction at beginning of asm wrapper
     // placed in platform::optional_hook

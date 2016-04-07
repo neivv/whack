@@ -7,6 +7,7 @@ use std::{mem, ptr};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::os::raw::c_void;
+use std::path::Path;
 use ::{HookableAsmWrap, ToPointer};
 
 pub fn nop() -> u8 {
@@ -67,7 +68,7 @@ impl Drop for MemoryProtection {
     }
 }
 
-pub unsafe fn redirect_stderr(filename: &str) -> bool {
+pub unsafe fn redirect_stderr(filename: &Path) -> bool {
     let handle = CreateFileW(winapi_str(filename).as_ptr(), GENERIC_WRITE, FILE_SHARE_READ,
         ptr::null_mut(), CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, ptr::null_mut());
     if handle != ptr::null_mut() {
