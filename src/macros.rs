@@ -6,25 +6,37 @@ pub trait ExportHook<Callback> {
 
 #[macro_export]
 macro_rules! export_hook {
+    (pub extern "stdcall" ($ord:expr) $name:ident($($aty:ty),*) -> $ret:ty) => {
+        impl_hook!(yes ~ true, $ord, $name, $ret, [$([$aty])*]);
+    };
+    (extern "stdcall" ($ord:expr) $name:ident($($aty:ty),*) -> $ret:ty) => {
+        impl_hook!(no ~ true, $ord, $name, $ret, [$([$aty])*]);
+    };
     (pub extern "stdcall" $name:ident($($aty:ty),*)) => {
         export_hook!(pub extern "stdcall" $name($($aty),*) -> ());
     };
     (pub extern "stdcall" $name:ident($($aty:ty),*) -> $ret:ty) => {
-        impl_hook!(yes ~ true, $name, $ret, [$([$aty])*]);
+        export_hook!(pub extern "stdcall" (-1i32) $name($($aty),*) -> $ret);
+    };
+    (extern "stdcall" $name:ident($($aty:ty),*)) => {
+        export_hook!(extern "stdcall" $name($($aty),*) -> ());
+    };
+    (extern "stdcall" $name:ident($($aty:ty),*) -> $ret:ty) => {
+        export_hook!(extern "stdcall" (-1i32) $name($($aty),*) -> $ret);
     };
 }
 
 #[macro_export]
 #[doc(hidden)]
 macro_rules! maybe_pub_struct {
-    (yes, $name: ident) => { pub struct $name; };
-    (no, $name: ident) => { struct $name; };
+    (yes, $name:ident) => { pub struct $name; };
+    (no, $name:ident) => { struct $name; };
 }
 
 #[macro_export]
 #[doc(hidden)]
 macro_rules! impl_named {
-    ($is_pub:ident ~ $stdcall:expr, $name:ident, $ret:ty, $([$an:ident: $aty:ty])*) => {
+    ($is_pub:ident ~ $stdcall:expr, $ord:expr, $name:ident, $ret:ty, $([$an:ident: $aty:ty])*) => {
         maybe_pub_struct!($is_pub, $name);
         impl $name {
             // caller -> assembly wrap -> in_wrap -> hook.
@@ -70,8 +82,12 @@ macro_rules! impl_named {
             }
 
             fn default_export() -> $crate::Export<'static> {
-                let name = stringify!($name);
-                $crate::Export::Name(name.as_bytes())
+                if $ord as i32 == -1 {
+                    let name = stringify!($name);
+                    $crate::Export::Name(name.as_bytes())
+                } else {
+                    $crate::Export::Ordinal($ord as u16)
+                }
             }
 
             unsafe fn write_wrapper(out: *mut u8, target: T, orig_addr: *const u8) {
@@ -268,24 +284,24 @@ macro_rules! out_wrapper_args_size {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! name_args {
-    ($is_pub:ident ~ $stdcall:expr, $name:ident, $ret:ty, [$([$oki:ident: $okt:ty])*],
+    ($is_pub:ident ~ $stdcall:expr, $ord:expr, $name:ident, $ret:ty, [$([$oki:ident: $okt:ty])*],
         [$next_ty:ty, $($rest_ty:ty,)*],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
-        name_args!($is_pub ~ $stdcall, $name, $ret,
+        name_args!($is_pub ~ $stdcall, $ord, $name, $ret,
                    [$([$oki: $okt])* [$next_id: $next_ty]], [$($rest_ty,)*], [$($rest_id),*]);
     };
-    ($is_pub:ident ~ $stdcall:expr, $name:ident, $ret:ty, [$([$oki:ident: $okt:ty])*], [], [$($rest:ident),*]) => {
-        impl_named!($is_pub ~ $stdcall, $name, $ret, $([$oki: $okt])*);
+    ($is_pub:ident ~ $stdcall:expr, $ord:expr, $name:ident, $ret:ty, [$([$oki:ident: $okt:ty])*], [], [$($rest:ident),*]) => {
+        impl_named!($is_pub ~ $stdcall, $ord, $name, $ret, $([$oki: $okt])*);
     };
 }
 
 #[macro_export]
 #[doc(hidden)]
 macro_rules! impl_hook {
-    ($is_pub:ident ~ $stdcall:expr, $name:ident, $ret:ty, [$([$argty:ty])*]) => {
+    ($is_pub:ident ~ $stdcall:expr, $ord:expr, $name:ident, $ret:ty, [$([$argty:ty])*]) => {
         // Increase arg name count if needed...
-        name_args!($is_pub ~ $stdcall, $name, $ret, [], [$($argty,)*], [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10]);
+        name_args!($is_pub ~ $stdcall, $ord, $name, $ret, [], [$($argty,)*], [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10]);
     };
 }
 
