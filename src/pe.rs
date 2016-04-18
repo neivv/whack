@@ -14,7 +14,7 @@ unsafe fn read_at<Ty: Copy>(offset: usize) -> Ty {
 /// Gets pointer to the import table of an image which has been loaded to memory.
 /// Preconditions: `image_base` must be address of first byte of the image (MS-DOS header).
 pub unsafe fn import_ptr(image_base: usize, dll_name: &[u8], import: Export) -> Option<*mut usize> {
-    import_table(image_base).and_then(|(imps, size)| {
+    import_table(image_base).and_then(|(imps, size, is_64)| {
         let mut pos = 0;
         while pos + 0x14 <= size {
             let name_offset = read_at::<u32>(imps + pos as usize + 0xc) as usize;
@@ -26,15 +26,23 @@ pub unsafe fn import_ptr(image_base: usize, dll_name: &[u8], import: Export) -> 
             if name.to_bytes().eq_ignore_ascii_case(dll_name) {
                 let lookups = image_base + read_at::<u32>(imps + pos as usize + 0x0) as usize;
                 let addresses = image_base + read_at::<u32>(imps + pos as usize + 0x10) as usize;
-                return Some((lookups, addresses));
+                return Some((lookups, addresses, is_64));
             }
             pos += 0x14;
         }
         None
-    }).and_then(|(lookups, addresses)| {
+    }).and_then(|(lookups, addresses, is_64)| {
         let mut pos = 0;
         loop {
-            let val = read_at::<u32>(lookups + pos);
+            let val = if is_64 {
+                // PE32+ has the high bits unused anyways, other than
+                // the highest one which is the name/ordinal bool bool.
+                let val = read_at::<u32>(lookups + pos);
+                let high = read_at::<u32>(lookups + pos + 4);
+                val | (high & 0x80000000)
+            } else {
+                read_at::<u32>(lookups + pos)
+            };
             if val == 0 {
                 return None;
             }
@@ -54,12 +62,12 @@ pub unsafe fn import_ptr(image_base: usize, dll_name: &[u8], import: Export) -> 
                     }
                 }
             }
-            pos += 0x4;
+            pos += if is_64 { 0x8 } else { 0x4 };
         }
     })
 }
 
-unsafe fn import_table(image_base: usize) -> Option<(usize, u32)> {
+unsafe fn import_table(image_base: usize) -> Option<(usize, u32, bool)> {
     if read_at::<u16>(image_base) != DOS_MAGIC {
         return None;
     }
@@ -73,9 +81,14 @@ unsafe fn import_table(image_base: usize) -> Option<(usize, u32)> {
     if opt_header_size < 0x70 {
         return None;
     }
-    let import_table_offset = read_at::<u32>(opt_header + 0x68);
-    let import_table_size = read_at::<u32>(opt_header + 0x6c);
-    Some((image_base + import_table_offset as usize, import_table_size))
+    let (is_64, import_data_dir) = match read_at::<u16>(opt_header) {
+        0x10b => (false, opt_header + 0x68),
+        0x20b => (true, opt_header + 0x78),
+        _ => return None,
+    };
+    let import_table_offset = read_at::<u32>(import_data_dir);
+    let import_table_size = read_at::<u32>(import_data_dir + 0x4);
+    Some((image_base + import_table_offset as usize, import_table_size, is_64))
 }
 
 #[test]

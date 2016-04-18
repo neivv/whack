@@ -10,8 +10,28 @@ extern crate scopeguard;
 
 #[macro_use]
 mod macros;
+#[macro_use]
+#[cfg(target_arch = "x86")]
+#[path = "macros_x86.rs"]
+mod macros_ex;
+#[macro_use]
+#[cfg(target_arch = "x86_64")]
+#[path = "macros_x86_64.rs"]
+mod macros_ex;
 mod pe;
+
+#[cfg(windows)]
+mod win_common;
+#[cfg(target_arch = "x86")]
+#[path = "x86.rs"]
 mod platform;
+#[cfg(target_arch = "x86_64")]
+#[path = "x86_64.rs"]
+mod platform;
+#[cfg(target_arch = "x86_64")]
+#[path = "x86_64_inline.rs"]
+#[doc(hidden)]
+pub mod platform_inline;
 
 mod patch_type {
     // Don't want to export this, but still share it between modules
@@ -306,6 +326,7 @@ impl<'a> AnyModulePatch<'a> {
 
 impl<'a> ModulePatch<'a> {
     /// Hooks a function, replacing it with `target`.
+    #[cfg(target_arch = "x86")]
     pub unsafe fn hook<Hook>(&mut self, _hook: Hook, target: Hook::Target) where Hook: HookableAsmWrap {
         let data = self.make_hook_wrapper::<Hook>(target);
         let diff = self.base.overflowing_sub(Hook::expected_base()).0;
@@ -359,6 +380,7 @@ impl<'a> ModulePatch<'a> {
 
     /// Hooks a piece of code. Unlike `hook`, this does not cause any original code
     /// to not be executed.
+    #[cfg(target_arch = "x86")]
     pub unsafe fn call_hook<Hook>(&mut self, _hook: Hook, target: Hook::Target) where Hook: HookableAsmWrap {
         let data = self.make_hook_wrapper::<Hook>(target);
         let diff = self.base.overflowing_sub(Hook::expected_base()).0;
@@ -369,6 +391,7 @@ impl<'a> ModulePatch<'a> {
     /// Hooks a function, dynamically choosing between behaviours of `hook` and `call_hook`.
     /// If the hook returns `Some(x)`, the original function is not run and `x` is returned,
     /// while returning `None` causes the original function to be executed afterwards.
+    #[cfg(target_arch = "x86")]
     pub unsafe fn optional_hook<Hook>(&mut self, _hook: Hook, target: Hook::OptionalTarget) where Hook: HookableAsmWrap {
         let diff = self.base.overflowing_sub(Hook::expected_base()).0;
         let src = Hook::address().overflowing_add(diff).0;
@@ -392,6 +415,7 @@ impl<'a> ModulePatchWithBase<'a> {
         unsafe { mem::transmute(mem::transmute::<_, usize>(addr.ptr()).overflowing_add(diff).0) }
     }
 
+    #[cfg(target_arch = "x86")]
     pub unsafe fn nop<Addr: ToPointer>(&mut self, addr: Addr, len: usize) {
         self.replace(addr, vec![platform::nop(); len])
     }
@@ -509,12 +533,4 @@ impl<T> ops::DerefMut for Variable<T> {
     fn deref_mut<'a>(&'a mut self) -> &'a mut T {
         unsafe { mem::transmute(self.address) }
     }
-}
-
-#[doc(hidden)]
-#[inline]
-/// For macros.
-pub unsafe fn write_call(out: *mut u8, addr: usize) {
-    *out = 0xe8;
-    *(out.offset(1) as *mut usize) = addr.wrapping_sub(out as usize).wrapping_sub(5);
 }

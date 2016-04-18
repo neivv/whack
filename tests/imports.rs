@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use whack::Patcher;
 
-export_hook!(pub extern "stdcall" CreateFileW(*const u16, u32, u32, u32, u32, u32, u32) -> winapi::HANDLE);
+export_hook!(pub extern "system" CreateFileW(*const u16, u32, u32, u32, u32, u32, u32) -> winapi::HANDLE);
 
 #[test]
 fn import_hooking() {
