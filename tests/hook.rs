@@ -26,7 +26,34 @@ mod hook {
     );
 }
 
+#[allow(dead_code)]
+mod hook_decl_tests {
+    declare_hooks!(0x1234,
+        0x1233 => Empty();
+        0x1233 => EmptyRetInt() -> u32;
+        0x1233 => NoRet(u32);
+    );
+}
 
+#[cfg(target_arch = "x86")]
+#[allow(dead_code)]
+mod hook_decl_tests_loc {
+    declare_hooks!(0x1234,
+        0x1233 => NoRet(@ecx u32);
+        0x2514 => Implicit(u32, @edi u32);
+        0x2514 => Implicit2(@esi u32, u32);
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
+mod hook_decl_tests_loc {
+    declare_hooks!(0x1234,
+        0x1233 => NoRet(@rcx u32);
+        0x2514 => Implicit(u32, @rdi u32);
+        0x2514 => Implicit2(@rsi u32, u32);
+    );
+}
 
 #[cfg(target_arch = "x86")]
 fn dll_path() -> &'static str {

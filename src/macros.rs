@@ -146,7 +146,7 @@ macro_rules! name_args {
                   [], [$($rest_id),*], [$($rest_loc),*]);
     };
     (yup, [$($other:tt),*], [$([$oki:ident @ $okl:ident: $okt:ty])*],
-        [$next_ty:ty, $($rest_args:tt)+],
+        [$next_ty:ty],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
         name_args!(yup, [$($other),*],
