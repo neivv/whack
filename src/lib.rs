@@ -24,24 +24,24 @@ mod pe;
 mod win_common;
 #[cfg(target_arch = "x86")]
 #[path = "x86.rs"]
-mod platform;
+#[doc(hidden)]
+pub mod platform;
 #[cfg(target_arch = "x86_64")]
 #[path = "x86_64.rs"]
-mod platform;
-#[cfg(target_arch = "x86_64")]
-#[path = "x86_64_inline.rs"]
 #[doc(hidden)]
-pub mod platform_inline;
+pub mod platform;
 
 mod patch_type {
     // Don't want to export this, but still share it between modules
     pub enum PatchType {
         // Import addr (relative from base), original, hook
         Import(usize, usize, usize),
+        // Addr (relative from base), wrapper
+        BasicHook(usize, usize),
     }
 }
 
-pub use macros::ExportHook;
+pub use macros::{AddressHook, ExportHook};
 
 use std::{ops, mem};
 use std::ffi::{OsStr, OsString};
@@ -326,12 +326,17 @@ impl<'a> AnyModulePatch<'a> {
 
 impl<'a> ModulePatch<'a> {
     /// Hooks a function, replacing it with `target`.
-    #[cfg(target_arch = "x86")]
-    pub unsafe fn hook<Hook>(&mut self, _hook: Hook, target: Hook::Target) where Hook: HookableAsmWrap {
-        let data = self.make_hook_wrapper::<Hook>(target);
-        let diff = self.base.overflowing_sub(Hook::expected_base()).0;
-        let src = Hook::address().overflowing_add(diff).0;
-        platform::jump_hook(src, mem::transmute(data));
+    pub unsafe fn hook<H, T>(&mut self, _hook: H, target: T) -> Patch
+    where H: AddressHook<T> {
+        let func = H::address(self.base);
+        let wrapper = platform::jump_hook::<H, T>(func, target, self.exec_heap);
+        let patch = Arc::new(PatchHistory {
+            ty: PatchType::BasicHook(func - self.base, wrapper),
+            all_modules_id: 0,
+        });
+        let weak = Arc::downgrade(&patch);
+        self.parent_patches.push(patch);
+        Patch(PatchEnum::Single(weak))
     }
 
     fn any_module_downgrade(&mut self, all_modules_id: u32) -> AnyModulePatch {
@@ -376,26 +381,6 @@ impl<'a> ModulePatch<'a> {
             data_pos = data_pos.offset(1);
         }
         data
-    }
-
-    /// Hooks a piece of code. Unlike `hook`, this does not cause any original code
-    /// to not be executed.
-    #[cfg(target_arch = "x86")]
-    pub unsafe fn call_hook<Hook>(&mut self, _hook: Hook, target: Hook::Target) where Hook: HookableAsmWrap {
-        let data = self.make_hook_wrapper::<Hook>(target);
-        let diff = self.base.overflowing_sub(Hook::expected_base()).0;
-        let src = Hook::address().overflowing_add(diff).0;
-        platform::call_hook(src, mem::transmute(data), &mut self.exec_heap);
-    }
-
-    /// Hooks a function, dynamically choosing between behaviours of `hook` and `call_hook`.
-    /// If the hook returns `Some(x)`, the original function is not run and `x` is returned,
-    /// while returning `None` causes the original function to be executed afterwards.
-    #[cfg(target_arch = "x86")]
-    pub unsafe fn optional_hook<Hook>(&mut self, _hook: Hook, target: Hook::OptionalTarget) where Hook: HookableAsmWrap {
-        let diff = self.base.overflowing_sub(Hook::expected_base()).0;
-        let src = Hook::address().overflowing_add(diff).0;
-        platform::optional_hook::<_, Hook>(src, mem::transmute(&target), &mut self.exec_heap);
     }
 
     fn alloc_exec(&mut self, size: usize) -> *mut u8 {

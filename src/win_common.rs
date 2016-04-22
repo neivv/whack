@@ -13,7 +13,7 @@ use kernel32;
 use rust_win32error::Win32Error;
 use winapi::{self, HANDLE, HMODULE};
 
-use {AnyModulePatch, Patcher, Export, ExportHook};
+use {AddressHook, AnyModulePatch, Patcher, Export, ExportHook};
 use patch_type::*;
 use pe;
 
@@ -150,6 +150,16 @@ pub unsafe fn redirect_stderr(filename: &Path) -> bool {
     }
 }
 
+pub unsafe fn jump_hook<H: AddressHook<T>, T>(func: usize,
+                                              target: T,
+                                              exec_heap: &mut ExecutableHeap
+                                             ) -> usize
+{
+    let wrapper_memory = exec_heap.allocate(H::wrapper_size(func as *const u8));
+    H::write_wrapper(wrapper_memory, target, func as *mut u8);
+    wrapper_memory as usize
+}
+
 pub unsafe fn import_hook<H: ExportHook<T>, T>(base_addr: usize,
                                 func_dll: &[u8],
                                 func: Export,
@@ -174,8 +184,8 @@ pub unsafe fn import_hook<H: ExportHook<T>, T>(base_addr: usize,
 
     pe::import_ptr(base_addr, &func_dll_with_extension, func).map(|ptr| {
         let orig = *ptr;
-        let wrapper_memory = exec_heap.allocate(H::wrapper_size());
-        H::write_wrapper(wrapper_memory, target, orig as *const u8);
+        let wrapper_memory = exec_heap.allocate(H::wrapper_size(orig as *const u8));
+        H::write_wrapper(wrapper_memory, target, orig as *mut u8);
         *ptr = wrapper_memory as usize;
         PatchType::Import(ptr as usize - base_addr, orig, wrapper_memory as usize)
     })

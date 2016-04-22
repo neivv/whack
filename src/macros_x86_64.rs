@@ -1,4 +1,3 @@
-
 #[macro_export]
 #[doc(hidden)]
 macro_rules! reg_id {
@@ -40,19 +39,62 @@ macro_rules! call_const_size {
 
 #[macro_export]
 #[doc(hidden)]
-macro_rules! impl_named {
-    ($is_pub:ident ~ system, $ord:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident: $aty:ty])*) => {
-        impl_named!(rax, $is_pub ~ $ord, $name, $ret, $([$an @ $aloc: $aty])*);
+macro_rules! impl_addr_hook {
+    ($is_pub:ident, cdecl, $base:expr, $addr:expr, $name:ident, $ret:ty,
+        $([$an:ident @ $aloc:ident: $aty:ty])*) =>
+    {
+        impl_addr_hook!(rax, $is_pub, $base, $addr, $name, $ret, $([$an @ $aloc: $aty])*);
     };
-    ($freereg:ident, $is_pub:ident ~ $ord:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident: $aty:ty])*) => {
+    ($freereg:ident, $is_pub:ident, $base:expr, $addr:expr, $name:ident, $ret:ty,
+        $([$an:ident @ $aloc:ident: $aty:ty])*) =>
+    {
         maybe_pub_struct!($is_pub, $name);
+        hook_impl_private!(no, $name, $freereg, $ret, $([$an @ $aloc: $aty])*);
+        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::AddressHook<T> for $name {
+            fn address(current_base: usize) -> usize {
+                current_base.wrapping_sub($base).wrapping_add($addr)
+            }
+
+            hook_wrapper_impl!(no, $name, $freereg, $ret, $([$an @ $aloc: $aty])*);
+        }
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! impl_import_hook {
+    ($is_pub:ident, system, $ord:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident: $aty:ty])*) => {
+        impl_import_hook!(rax, $is_pub, $ord, $name, $ret, $([$an @ $aloc: $aty])*);
+    };
+    ($freereg:ident, $is_pub:ident, $ord:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident: $aty:ty])*) => {
+        maybe_pub_struct!($is_pub, $name);
+        hook_impl_private!(yes, $name, $freereg, $ret, $([$an @ $aloc: $aty])*);
+        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::ExportHook<T> for $name {
+            fn default_export() -> $crate::Export<'static> {
+                if $ord as i32 == -1 {
+                    let name = stringify!($name);
+                    $crate::Export::Name(name.as_bytes())
+                } else {
+                    $crate::Export::Ordinal($ord as u16)
+                }
+            }
+
+            hook_wrapper_impl!(yes, $name, $freereg, $ret, $([$an @ $aloc: $aty])*);
+        }
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! hook_impl_private {
+    ($fnptr_hook:ident, $name:ident, $freereg:ident, $ret:ty, $([$an:ident @ $aloc:ident: $aty:ty])*) => {
         impl $name {
             // caller -> assembly wrap -> in_wrap -> hook.
             // If the hook wishes to call original function,
             // then it'll go hook -> out_wrap -> assembly -> original.
             // Orig is pointer to the assembly wrapper which calls original function,
             // Real is pointer to the fat pointer of hook Fn(...).
-            extern fn in_wrap($($an: $aty),*,
+            extern fn in_wrap($($an: $aty,)*
                               orig: extern fn($($aty),*) -> $ret,
                               real: *const *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret
                              ) -> $ret
@@ -76,70 +118,92 @@ macro_rules! impl_named {
                 ((needed - 1) | 0xf) + 1
             }
 
-            fn out_asm_size() -> usize {
-                // Arg pushes + call + ret
-                let needed = call_const_size!(rax);
+            unsafe fn out_asm_size(_orig: *const u8) -> usize {
+                let needed = out_asm_size!($fnptr_hook, $freereg, _orig, 1, 0, [$($aloc),*]).0 as usize;
                 // Round to 16
                 ((needed - 1) | 0xf) + 1
             }
         }
-        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::ExportHook<T> for $name {
-            fn wrapper_size() -> usize {
-                $name::in_asm_size() + $name::out_asm_size() + ::std::mem::size_of::<T>() +
-                    ::std::mem::size_of::<*const Fn($($aty,)* &Fn($($aty),*) -> $ret)>()
-            }
+    }
+}
 
-            fn default_export() -> $crate::Export<'static> {
-                if $ord as i32 == -1 {
-                    let name = stringify!($name);
-                    $crate::Export::Name(name.as_bytes())
-                } else {
-                    $crate::Export::Ordinal($ord as u16)
-                }
-            }
+#[macro_export]
+#[doc(hidden)]
+macro_rules! out_asm_size {
+    (yes, $freereg:ident, $orig:expr, $arg_num:expr, $pos:expr, [$($aloc:ident),*]) => {
+        (call_const_size!($freereg), 0)
+    };
+    (no, $freereg:ident, $orig:expr, $arg_num:expr, $pos:expr, [$loc:ident $(,$aloc:ident)*]) => {{
+        let (amt, pos) = out_asm_size!(no, $freereg, $orig, $arg_num + 1, $pos, [$($aloc),*]);
+        let loc = reg_id_or_stack!($loc);
+        $crate::platform::out_wrapper_arg_size(amt, loc, $arg_num, pos)
+    }};
+    (no, $freereg:ident, $orig:expr, $arg_num:expr, $pos:expr, []) => {{
+        let reg_id = reg_id!($freereg);
+        let jmp_size = call_const_size!($freereg);
+        let ret_push_size = $crate::platform::const_push_size(reg_id);
+        // 6 + 8 for jmp [rip + 6], 4 for sub rsp, 20
+        (ret_push_size + 6 + 8 + 4 + $crate::platform::ins_len($orig, jmp_size) + 7 + 1, 0)
+    }};
+}
 
-            unsafe fn write_wrapper(out: *mut u8, target: T, orig_addr: *const u8) {
-                let in_wrap_addr = $name::in_wrap as usize;
-                let out_wrapper = out.offset($name::in_asm_size() as isize) as usize;
-                let target_addr = out.offset(($name::in_asm_size() + $name::out_asm_size()) as isize) as usize;
-                let mut out_pos = out;
-
-                // IN WRAPPER
-                // Push args.
-                out_pos = write_in_wrapper_args!($freereg, out_pos, 1, 0, 0,
-                                                 target_addr, out_wrapper, [$($aty),*], [$($aloc),*]).0;
-                // sub rsp, 20
-                *(out_pos as *mut u32) = 0x20ec8348;
-                out_pos = out_pos.offset(4);
-                // Call in_wrap()
-                let reg = reg_id!($freereg);
-                out_pos = $crate::platform_inline::write_call(out_pos, reg, in_wrap_addr);
-                // Pop in_wrapper arguments. Adds 2 for the two pointers.
-                out_pos = pop_wrapper_args!(out_pos, 2 $(,$aty)*);
-                // Return.
-                *out_pos = 0xc3;
-                assert!(out_pos as usize <= out_wrapper);
-                out_pos = out_wrapper as *mut u8;
-                // OUT WRAPPER
-                // Just jump to the original code.
-                // TODO: Do compilers generate strange calling conventions on 64-bit windows?
-                // In wrapper doesn't handle them really either, but it has register order
-                // softcoded.
-                out_pos = $crate::platform_inline::write_jump(out_pos, reg, orig_addr as usize);
-
-                assert!(out_pos as usize <= target_addr);
-                out_pos = target_addr as *mut u8;
-                let ptr_size = ::std::mem::size_of::<
-                    *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret >() as isize;
-                let target_mem = out_pos.offset(ptr_size) as *mut T;
-                ::std::ptr::copy_nonoverlapping(&target, target_mem, 1);
-                ::std::mem::forget(target);
-                let target_ptr: *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret = target_mem;
-                let ptr_pos = out_pos as *mut *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
-                ::std::ptr::copy_nonoverlapping(&target_ptr, ptr_pos, 1);
-                ::std::mem::forget(target_ptr);
-            }
+#[macro_export]
+#[doc(hidden)]
+macro_rules! hook_wrapper_impl {
+    ($fnptr_hook:ident, $name:ident, $freereg:ident, $ret:ty, $([$an:ident @ $aloc:ident: $aty:ty])*) => {
+        unsafe fn wrapper_size(orig: *const u8) -> usize {
+            $name::in_asm_size() + $name::out_asm_size(orig) + ::std::mem::size_of::<T>() +
+                ::std::mem::size_of::<*const Fn($($aty,)* &Fn($($aty),*) -> $ret)>()
         }
+
+        unsafe fn write_wrapper(out: *mut u8, target: T, orig_addr: *mut u8) {
+            let in_wrap_addr = $name::in_wrap as usize;
+            let out_wrapper = out.offset($name::in_asm_size() as isize) as usize;
+            let target_addr = out.offset(($name::in_asm_size() + $name::out_asm_size(orig_addr)) as isize) as usize;
+            let mut out_pos = out;
+
+            // IN WRAPPER
+            // Push args.
+            out_pos = write_in_wrapper_args!($freereg, out_pos, 1, 0, 0,
+                                             target_addr, out_wrapper, [$($aloc),*]).0;
+            // sub rsp, 20
+            *(out_pos as *mut u32) = 0x20ec8348;
+            out_pos = out_pos.offset(4);
+            // Call in_wrap()
+            let reg = reg_id!($freereg);
+            out_pos = $crate::platform::write_call(out_pos, reg, in_wrap_addr);
+            // Pop in_wrapper arguments. Adds 2 for the two pointers.
+            out_pos = pop_wrapper_args!(out_pos, 2 $(,$aty)*);
+            // Return.
+            *out_pos = 0xc3;
+            assert!(out_pos as usize <= out_wrapper);
+            out_pos = out_wrapper as *mut u8;
+            // OUT WRAPPER
+            out_pos = write_out_wrapper!($fnptr_hook, out_pos, reg, orig_addr, 0, [$($aloc),*]);
+
+            assert!(out_pos as usize <= target_addr);
+            out_pos = target_addr as *mut u8;
+            let ptr_size = ::std::mem::size_of::<
+                *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret >() as isize;
+            let target_mem = out_pos.offset(ptr_size) as *mut T;
+            ::std::ptr::copy_nonoverlapping(&target, target_mem, 1);
+            ::std::mem::forget(target);
+            let target_ptr: *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret = target_mem;
+            let ptr_pos = out_pos as *mut *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
+            ::std::ptr::copy_nonoverlapping(&target_ptr, ptr_pos, 1);
+            ::std::mem::forget(target_ptr);
+
+            write_hooking_jump!($fnptr_hook, orig_addr, reg, out);
+        }
+    }
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! write_hooking_jump {
+    (yes, $src:expr, $clobber:expr, $dest:expr) => {};
+    (no, $src:expr, $clobber:expr, $dest:expr) => {
+        $crate::platform::write_jump($src, $clobber, $dest)
     };
 }
 
@@ -161,18 +225,18 @@ macro_rules! reg_id_or_stack {
 #[doc(hidden)]
 macro_rules! write_in_wrapper_args {
     ($freereg:ident, $out:expr, $pos:expr, $arg_num:expr, $stack_arg_num:expr, $target:expr, $out_wrapper:expr,
-        [$next:ty $(,$aty:ty)*], [$loc:ident $(,$aloc:ident)*]) => {{
+        [$loc:ident $(,$aloc:ident)*]) => {{
         // The reg args also have stack space as well. Doesn't work with exotic calling conventions
         let _next_stack_arg = $stack_arg_num + 1;
         let (out, pos) = write_in_wrapper_args!($freereg, $out, $pos, $arg_num + 1, _next_stack_arg,
-                                                $target, $out_wrapper, [$($aty),*], [$($aloc),*]);
+                                                $target, $out_wrapper, [$($aloc),*]);
         let id = reg_id_or_stack!($loc);
-        $crate::platform_inline::write_in_wrapper_arg(out, id, $arg_num, pos, $stack_arg_num)
+        $crate::platform::write_in_wrapper_arg(out, id, $arg_num, pos, $stack_arg_num)
     }};
     ($freereg:ident, $out:expr, $pos: expr, $arg_num:expr, $stack_arg_num:expr,
-     $target:expr, $out_wrap:expr, [], []) => {{
+     $target:expr, $out_wrap:expr, []) => {{
         let reg = reg_id!($freereg);
-        $crate::platform_inline::write_in_wrapper_const_args($out, $arg_num, $pos, reg, $out_wrap, $target)
+        $crate::platform::write_in_wrapper_const_args($out, $arg_num, $pos, reg, $out_wrap, $target)
     }};
 }
 
@@ -250,6 +314,32 @@ macro_rules! pop_wrapper_args {
 
 #[macro_export]
 #[doc(hidden)]
+macro_rules! write_out_wrapper {
+    (yes, $out:expr, $reg_id:expr, $orig:expr, $arg_num:expr, [$($aloc:ident),*]) => {
+        // Just jump to the original code.
+        // TODO: Are there any unusual calling conventions in exported functions?
+        // In wrapper doesn't handle them really either, but it has register order
+        // softcoded.
+        $crate::platform::write_jump($out, $reg_id, $orig)
+    };
+    (no, $out:expr, $reg_id:expr, $orig:expr, $arg_num:expr, [$loc:ident $(,$aloc:ident)*]) => {{
+        let (out, pos) = write_out_wrapper!(no_args, $out, $orig, $arg_num + 1, [$($aloc),*]);
+        let loc = reg_id_or_stack!($loc);
+        let (out, pos) = $crate::platform::write_out_argument(out, pos, loc, $arg_num);
+        $crate::platform::write_out_call(out, $reg_id, $orig, pos)
+    }};
+    (no_args, $out:expr, $orig:expr, $arg_num:expr, [$loc:ident $(,$aloc:ident)*]) => {{
+        let (out, pos) = write_out_wrapper!(no_args, $out, $orig, $arg_num + 1, [$($aloc),*]);
+        let loc = reg_id_or_stack!($loc);
+        $crate::platform::write_out_argument(out, pos, loc, $arg_num)
+    }};
+    (no_args, $out:expr, $orig:expr, $arg_num:expr, []) => {{
+        ($out, 1)
+    }};
+}
+
+#[macro_export]
+#[doc(hidden)]
 macro_rules! in_wrapper_pop_size {
     ($pos:expr, $next:ty $(,$aty:ty)*) => {
         in_wrapper_pop_size!($pos + 1 $(,$aty)*)
@@ -273,9 +363,20 @@ macro_rules! in_wrapper_ret_size {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! impl_hook {
-    ($is_pub:ident ~ $abi:ident, $ord:expr, $name:ident, $ret:ty, [$([$argty:ty])*]) => {
+    ($is_pub:ident ~ $abi:ident, $ord:expr, $name:ident, $ret:ty, [$([$args:tt])*]) => {
         // Increase arg name count if needed...
-        name_args!($is_pub ~ $abi, $ord, $name, $ret, [], [$($argty,)*], [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10],
-                    [rcx, rdx, r8, r9, stack, stack, stack, stack, stack, stack]);
+        name_args!(nope, [imp, $is_pub, $abi, $ord, $name, $ret], [], [$($args)*],
+                   [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10],
+                   [rcx, rdx, r8, r9, stack, stack, stack, stack, stack, stack]);
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! do_addr_hook {
+    ($is_pub:ident ~ $abi:ident, $base:expr, $addr:expr, $name:ident, $ret:ty, [$([$args:tt])*]) => {
+        name_args!(nope, [addr, $is_pub, $abi, $base, $addr, $name, $ret], [], [$($args)*],
+                   [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10],
+                   [rcx, rdx, r8, r9, stack, stack, stack, stack, stack, stack]);
     };
 }
