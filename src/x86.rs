@@ -49,12 +49,12 @@ unsafe fn write_mov(out: *mut u8, to: u8, from: u8, stack_off: u32) -> *mut u8 {
             if stack_off < 0x20 {
                 *out.offset(1) = 0x44 + 8 * to;
                 *out.offset(2) = 0x24;
-                *out.offset(3) = stack_off as u8;
+                *out.offset(3) = (stack_off * 4) as u8;
                 out.offset(4)
             } else {
                 *out.offset(1) = 0x84 + 8 * to & 0x7;
                 *out.offset(2) = 0x24;
-                *(out.offset(3) as *mut u32) = stack_off as u32;
+                *(out.offset(3) as *mut u32) = stack_off * 4;
                 out.offset(7)
             }
         }
@@ -140,10 +140,10 @@ unsafe fn x86_sib_ins_size(ins: *const u8) -> usize {
 
 unsafe fn x86_ins_size(ins: *const u8) -> usize {
     match *ins {
-        0x50 ... 0x62 => 1,
+        0x50 ... 0x61 | 0x90 => 1,
         0x68 => 5,
-        0x84 ... 0x90 | 0xff => x86_sib_ins_size(ins),
-        0x83 | 0xc6 => x86_sib_ins_size(ins) + 1,
+        0x00 ... 0x03 | 0x84 ... 0x8f | 0xff => x86_sib_ins_size(ins),
+        0x83 | 0xc0 | 0xc1 | 0xc6 => x86_sib_ins_size(ins) + 1,
         0x81 => x86_sib_ins_size(ins) + 4,
         0xa1 | 0xb9 | 0xba | 0xe8 | 0xe9 => 5,
         n => panic!("Unimpl ins size 0x{:x}", n),

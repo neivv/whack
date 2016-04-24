@@ -6,23 +6,25 @@ extern crate winapi;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use whack::Patcher;
 #[cfg(target_arch = "x86")]
 mod hook {
-    pub const BASE: usize = 0x6D9C0000;
-    declare_hooks!(0x6D9C0000,
-        0x6D9C15C0 => HookTest(u32, u32, u32, u32, u32) -> u32;
+    pub const BASE: usize = 0x68100000;
+    declare_hooks!(0x68100000,
+        0x68101610 => HookTest(u32, u32, u32, u32, u32) -> u32;
+        0x681015D4 => HookReg(@eax u32, @ecx u32, @esi u32) -> u32;
+        0x681015FA => HookRegStack(@eax u32, @ecx u32, @edx u32, u32, @esi u32) -> u32;
     );
 }
 
 #[cfg(target_arch = "x86_64")]
 mod hook {
-    pub const BASE: usize = 0x6D7C0000;
-    declare_hooks!(0x6D7C0000,
-        0x6D7C1480 => HookTest(u32, u32, u32, u32, u32) -> u32;
+    pub const BASE: usize = 0x6C340000;
+    declare_hooks!(0x6C340000,
+        0x6C3414F0 => HookTest(u32, u32, u32, u32, u32) -> u32;
+        0x6C3414A5 => HookReg(@rbx u32, @rdi u32, @rsi u32) -> u32;
+        0x6C3414C7 => HookRegStack(@rbx u32, @rdi u32, @r15 u32, u32, @rsi u32) -> u32;
     );
 }
 
@@ -84,25 +86,50 @@ fn address_hooking() {
         assert!(lib != null_mut());
         let func = kernel32::GetProcAddress(lib, b"test_func\0".as_ptr() as *const i8);
         assert!(func != null_mut());
+        let func2 = kernel32::GetProcAddress(lib, b"asm_reg_args_h\0".as_ptr() as *const i8);
+        assert!(func2 != null_mut());
+        let func3 = kernel32::GetProcAddress(lib, b"asm_reg_stack_args_h\0".as_ptr() as *const i8);
+        assert!(func3 != null_mut());
+
         let func = std::mem::transmute::<_, extern fn(u32, u32, u32, u32, u32) -> u32>(func);
         let result = func(1, 2, 3, 4, 5);
         assert_eq!(result, 2505397621);
-        let value = Rc::new(AtomicUsize::new(0));
+
+        let func2 = std::mem::transmute::<_, extern fn(u32, u32, u32) -> u32>(func2);
+        let result = func2(0x12, 0x34, 0x56);
+        assert_eq!(result, 6);
+
+        let func3 = std::mem::transmute::<_, extern fn(u32, u32, u32, u32, u32) -> u32>(func3);
+        let result = func3(0x12, 0x34, 0x56, 0x78, 0x9a);
+        assert_eq!(result, 0x6f1c);
+
         let patcher = Patcher::new();
         {
             let mut patcher = patcher.lock().unwrap();
-            let copy = value.clone();
             patcher.patch_library(dll_name(), move |mut patch| {
-                let copy = copy.clone();
-                patch.hook(hook::HookTest,
+                patch.hook_closure(hook::HookTest,
                     move |a: u32, b: u32, c: u32, d: u32, e: u32, orig: &Fn(_, _, _, _, _) -> _| {
-                    copy.fetch_add(1, Ordering::SeqCst);
+                    orig(e, d, c, b, a)
+                });
+                patch.hook_closure(hook::HookReg,
+                    move |a: u32, b: u32, c: u32, orig: &Fn(_, _, _) -> _| {
+                    orig(c, b, a)
+                });
+                patch.hook_closure(hook::HookRegStack,
+                    move |a: u32, b: u32, c: u32, d: u32, e: u32, orig: &Fn(_, _, _, _, _) -> _| {
                     orig(e, d, c, b, a)
                 });
             });
         }
         let result = func(1, 2, 3, 4, 5);
         assert_eq!(result, 3937053386);
+        // TODO: x86_64 doesn't work
+        if cfg!(target_arch = "x86") {
+            let result = func2(0x12, 0x34, 0x56);
+            assert_eq!(result, 0x26a);
+            let result = func3(0x12, 0x34, 0x56, 0x78, 0x9a);
+            assert_eq!(result, 0x4128);
+        }
     }
 }
 

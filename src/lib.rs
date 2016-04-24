@@ -41,7 +41,7 @@ mod patch_type {
     }
 }
 
-pub use macros::{AddressHook, ExportHook};
+pub use macros::{AddressHook, AddressHookClosure, ExportHook, ExportHookClosure};
 
 use std::{ops, mem};
 use std::ffi::{OsStr, OsString};
@@ -305,8 +305,8 @@ impl<'a> AnyModulePatch<'a> {
     /// `target` can be acquired from casting a function pointer with
     /// correct signature to `usize`. The caller must take care to
     /// pass a hook with correct signature/calling convention.
-    pub fn import_hook<H, T>(&mut self, dll: &[u8], _hook: H, target: T) -> Option<Patch>
-    where H: ExportHook<T>,
+    pub fn import_hook_closure<H, T>(&mut self, dll: &[u8], _hook: H, target: T) -> Option<Patch>
+    where H: ExportHookClosure<T>,
     {
         let func = H::default_export();
         match unsafe { platform::import_hook::<H, T>(self.base, dll, func, target, self.exec_heap) } {
@@ -322,12 +322,41 @@ impl<'a> AnyModulePatch<'a> {
             None => None,
         }
     }
+
+    /// Hooks current module's imported function by editing module's
+    /// import table.
+    ///
+    /// If the module doesn't import such function, `None` is returned.
+    ///
+    /// Hooks to an `unsafe fn`, which doesn't take reference to the original function.
+    /// For hooking with ability to call original function, use `import_hook_opt`,
+    /// For hooking to a safe function, use `import_hook_closure`.
+    pub fn import_hook<H>(&mut self, dll: &[u8], _hook: H, target: H::Fnptr) -> Option<Patch>
+    where H: ExportHook,
+    {
+        _hook.import(self, dll, target)
+    }
+
+
+    /// Hooks current module's imported function by editing module's
+    /// import table.
+    ///
+    /// If the module doesn't import such function, `None` is returned.
+    ///
+    /// Hooks to an `unsafe fn`, which takes reference to the original function.
+    /// For hooking without ability to call original function, use `import_hook`,
+    /// for hooking to a safe function, use `import_hook_closure`.
+    pub fn import_hook_opt<H>(&mut self, dll: &[u8], _hook: H, target: H::OptFnptr) -> Option<Patch>
+    where H: ExportHook,
+    {
+        _hook.import_opt(self, dll, target)
+    }
 }
 
 impl<'a> ModulePatch<'a> {
     /// Hooks a function, replacing it with `target`.
-    pub unsafe fn hook<H, T>(&mut self, _hook: H, target: T) -> Patch
-    where H: AddressHook<T> {
+    pub unsafe fn hook_closure<H, T>(&mut self, _hook: H, target: T) -> Patch
+    where H: AddressHookClosure<T> {
         let func = H::address(self.base);
         let wrapper = platform::jump_hook::<H, T>(func, target, self.exec_heap);
         let patch = Arc::new(PatchHistory {
@@ -337,6 +366,18 @@ impl<'a> ModulePatch<'a> {
         let weak = Arc::downgrade(&patch);
         self.parent_patches.push(patch);
         Patch(PatchEnum::Single(weak))
+    }
+
+    pub unsafe fn hook<H>(&mut self, _hook: H, target: H::Fnptr) -> Patch
+    where H: AddressHook,
+    {
+        _hook.hook(self, target)
+    }
+
+    pub unsafe fn hook_opt<H>(&mut self, _hook: H, target: H::OptFnptr) -> Patch
+    where H: AddressHook,
+    {
+        _hook.hook_opt(self, target)
     }
 
     fn any_module_downgrade(&mut self, all_modules_id: u32) -> AnyModulePatch {

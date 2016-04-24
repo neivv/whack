@@ -50,13 +50,15 @@ macro_rules! impl_addr_hook {
     {
         maybe_pub_struct!($is_pub, $name);
         hook_impl_private!(no, $name, $freereg, $ret, $([$an @ $aloc: $aty])*);
-        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::AddressHook<T> for $name {
+        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::AddressHookClosure<T> for $name {
             fn address(current_base: usize) -> usize {
                 current_base.wrapping_sub($base).wrapping_add($addr)
             }
 
             hook_wrapper_impl!(no, $name, $freereg, $ret, $([$an @ $aloc: $aty])*);
         }
+
+        impl_address_hook!($name, $ret, [$($aty),*], [$($an),*]);
     };
 }
 
@@ -69,7 +71,7 @@ macro_rules! impl_import_hook {
     ($freereg:ident, $is_pub:ident, $ord:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident: $aty:ty])*) => {
         maybe_pub_struct!($is_pub, $name);
         hook_impl_private!(yes, $name, $freereg, $ret, $([$an @ $aloc: $aty])*);
-        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::ExportHook<T> for $name {
+        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::ExportHookClosure<T> for $name {
             fn default_export() -> $crate::Export<'static> {
                 if $ord as i32 == -1 {
                     let name = stringify!($name);
@@ -81,6 +83,8 @@ macro_rules! impl_import_hook {
 
             hook_wrapper_impl!(yes, $name, $freereg, $ret, $([$an @ $aloc: $aty])*);
         }
+
+        impl_export_hook!($name, $ret, [$($aty),*], [$($an),*]);
     };
 }
 
@@ -327,6 +331,9 @@ macro_rules! write_out_wrapper {
         let loc = reg_id_or_stack!($loc);
         let (out, pos) = $crate::platform::write_out_argument(out, pos, loc, $arg_num);
         $crate::platform::write_out_call(out, $reg_id, $orig, pos)
+    }};
+    (no, $out:expr, $reg_id:expr, $orig:expr, $arg_num:expr, []) => {{
+        $crate::platform::write_out_call($out, $reg_id, $orig, 1)
     }};
     (no_args, $out:expr, $orig:expr, $arg_num:expr, [$loc:ident $(,$aloc:ident)*]) => {{
         let (out, pos) = write_out_wrapper!(no_args, $out, $orig, $arg_num + 1, [$($aloc),*]);

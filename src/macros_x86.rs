@@ -48,13 +48,15 @@ macro_rules! impl_addr_hook {
     {
         maybe_pub_struct!($is_pub, $name);
         hook_impl_private!(no, $stdcall, $name, $ret, $([$an @ $aloc: $aty])*);
-        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::AddressHook<T> for $name {
+        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::AddressHookClosure<T> for $name {
             fn address(current_base: usize) -> usize {
                 current_base.wrapping_sub($base).wrapping_add($addr)
             }
 
             hook_wrapper_impl!(no, $stdcall, $name, $ret, $([$an @ $aloc: $aty])*);
         }
+
+        impl_address_hook!($name, $ret, [$($aty),*], [$($an),*]);
     };
 }
 
@@ -67,7 +69,7 @@ macro_rules! impl_import_hook {
     ($is_pub:ident, stdcall, $ord:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident: $aty:ty])*) => {
         maybe_pub_struct!($is_pub, $name);
         hook_impl_private!(yes, true, $name, $ret, $([$an @ $aloc: $aty])*);
-        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::ExportHook<T> for $name {
+        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::ExportHookClosure<T> for $name {
             fn default_export() -> $crate::Export<'static> {
                 if $ord as i32 == -1 {
                     let name = stringify!($name);
@@ -79,6 +81,8 @@ macro_rules! impl_import_hook {
 
             hook_wrapper_impl!(yes, true, $name, $ret, $([$an @ $aloc: $aty])*);
         }
+
+        impl_export_hook!($name, $ret, [$($aty),*], [$($an),*]);
     }
 }
 

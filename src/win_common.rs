@@ -13,7 +13,7 @@ use kernel32;
 use rust_win32error::Win32Error;
 use winapi::{self, HANDLE, HMODULE};
 
-use {AddressHook, AnyModulePatch, Patcher, Export, ExportHook};
+use {AddressHookClosure, AnyModulePatch, Patcher, Export, ExportHookClosure};
 use patch_type::*;
 use pe;
 
@@ -150,7 +150,7 @@ pub unsafe fn redirect_stderr(filename: &Path) -> bool {
     }
 }
 
-pub unsafe fn jump_hook<H: AddressHook<T>, T>(func: usize,
+pub unsafe fn jump_hook<H: AddressHookClosure<T>, T>(func: usize,
                                               target: T,
                                               exec_heap: &mut ExecutableHeap
                                              ) -> usize
@@ -160,7 +160,7 @@ pub unsafe fn jump_hook<H: AddressHook<T>, T>(func: usize,
     wrapper_memory as usize
 }
 
-pub unsafe fn import_hook<H: ExportHook<T>, T>(base_addr: usize,
+pub unsafe fn import_hook<H: ExportHookClosure<T>, T>(base_addr: usize,
                                 func_dll: &[u8],
                                 func: Export,
                                 target: T,
@@ -194,7 +194,7 @@ pub unsafe fn import_hook<H: ExportHook<T>, T>(base_addr: usize,
 /// Patches the imports of module given by `get_patch()`
 pub fn apply_library_loading_hook(patcher: &Patcher, mut patch: AnyModulePatch) {
     let patcher_clone = patcher.clone_ref();
-    patch.import_hook(b"kernel32", hook::LoadLibraryA,
+    patch.import_hook_closure(b"kernel32", hook::LoadLibraryA,
         move |filename, orig: &Fn(_) -> _| {
         let already_loaded = unsafe { kernel32::GetModuleHandleA(filename) } != ptr::null_mut();
         let result = orig(filename);
@@ -204,7 +204,7 @@ pub fn apply_library_loading_hook(patcher: &Patcher, mut patch: AnyModulePatch) 
         result
     });
     let patcher_clone = patcher.clone_ref();
-    patch.import_hook(b"kernel32", hook::LoadLibraryExA,
+    patch.import_hook_closure(b"kernel32", hook::LoadLibraryExA,
         move |filename, file, flags, orig: &Fn(_, _, _) -> _| {
         let already_loaded = unsafe { kernel32::GetModuleHandleA(filename) } != ptr::null_mut();
         let result = orig(filename, file, flags);
@@ -214,7 +214,7 @@ pub fn apply_library_loading_hook(patcher: &Patcher, mut patch: AnyModulePatch) 
         result
     });
     let patcher_clone = patcher.clone_ref();
-    patch.import_hook(b"kernel32", hook::LoadLibraryW,
+    patch.import_hook_closure(b"kernel32", hook::LoadLibraryW,
         move |filename, orig: &Fn(_) -> _| {
         let already_loaded = unsafe { kernel32::GetModuleHandleW(filename) } != ptr::null_mut();
         let result = orig(filename);
@@ -224,7 +224,7 @@ pub fn apply_library_loading_hook(patcher: &Patcher, mut patch: AnyModulePatch) 
         result
     });
     let patcher_clone = patcher.clone_ref();
-    patch.import_hook(b"kernel32", hook::LoadLibraryExW,
+    patch.import_hook_closure(b"kernel32", hook::LoadLibraryExW,
         move |filename, file, flags, orig: &Fn(_, _, _) -> _| {
         let already_loaded = unsafe { kernel32::GetModuleHandleW(filename) } != ptr::null_mut();
         let result = orig(filename, file, flags);

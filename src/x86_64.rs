@@ -36,19 +36,18 @@ unsafe fn write_mov(out: *mut u8, to: u8, from: u8, stack_off: u32) -> *mut u8 {
     match (to, from) {
         (x, y) if x == y => out,
         (to, from) if from == !0 => {
-            *out = 0x67;
-            *out.offset(1) = if to < 8 { 0x48 } else { 0x4c };
-            *out.offset(2) = 0x8b;
+            *out.offset(0) = if to < 8 { 0x48 } else { 0x4c };
+            *out.offset(1) = 0x8b;
             if stack_off < 0x10 {
-                *out.offset(3) = 0x44 + 8 * (to & 0x7);
-                *out.offset(4) = 0x24;
-                *out.offset(5) = stack_off as u8;
-                out.offset(6)
+                *out.offset(2) = 0x44 + 8 * (to & 0x7);
+                *out.offset(3) = 0x24;
+                *out.offset(4) = (stack_off * 8) as u8;
+                out.offset(5)
             } else {
-                *out.offset(3) = 0x84 + 8 * (to & 0x7);
-                *out.offset(4) = 0x24;
-                *(out.offset(5) as *mut u32) = stack_off as u32;
-                out.offset(9)
+                *out.offset(2) = 0x84 + 8 * (to & 0x7);
+                *out.offset(3) = 0x24;
+                *(out.offset(4) as *mut u32) = stack_off * 8;
+                out.offset(8)
             }
         }
         (to, from) => {

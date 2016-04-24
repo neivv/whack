@@ -1,13 +1,29 @@
-pub trait AddressHook<Callback> {
+pub trait AddressHookClosure<Callback> {
     unsafe fn wrapper_size(orig: *const u8) -> usize;
     fn address(base: usize) -> usize;
     unsafe fn write_wrapper(out: *mut u8, target: Callback, orig_addr: *mut u8);
 }
 
-pub trait ExportHook<Callback> {
+pub trait AddressHook {
+    type Fnptr;
+    type OptFnptr;
+    unsafe fn hook<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::Fnptr) -> ::Patch;
+    unsafe fn hook_opt<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::OptFnptr) -> ::Patch;
+}
+
+pub trait ExportHookClosure<Callback> {
     unsafe fn wrapper_size(orig: *const u8) -> usize;
     fn default_export() -> ::Export<'static>;
     unsafe fn write_wrapper(out: *mut u8, target: Callback, orig_addr: *mut u8);
+}
+
+pub trait ExportHook {
+    type Fnptr;
+    type OptFnptr;
+    fn import<'a>(self, patch: &mut ::AnyModulePatch<'a>, dll: &[u8],
+                  val: Self::Fnptr) -> Option<::Patch>;
+    fn import_opt<'a>(self, patch: &mut ::AnyModulePatch<'a>, dll: &[u8],
+                  val: Self::OptFnptr) -> Option<::Patch>;
 }
 
 #[macro_export]
@@ -34,25 +50,76 @@ macro_rules! export_hook {
 
 #[macro_export]
 macro_rules! declare_hooks {
+    (stdcall, $base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
+        $(address_hook!(stdcall, $base, $addr, pub $name($($args)*) $(-> $ret)*);)*
+    };
     ($base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
-        $(address_hook!($base, $addr, pub $name($($args)*) $(-> $ret)*);)*
+        $(address_hook!(cdecl, $base, $addr, pub $name($($args)*) $(-> $ret)*);)*
     };
 }
 
 #[macro_export]
 macro_rules! address_hook {
-    ($base:expr, $addr:expr, pub $name:ident($($aty:tt)*)) => {
-        do_addr_hook!(yes ~ cdecl, $base, $addr, $name, (), [$([$aty])*]);
+    ($abi:ident, $base:expr, $addr:expr, pub $name:ident($($aty:tt)*)) => {
+        do_addr_hook!(yes ~ $abi, $base, $addr, $name, (), [$([$aty])*]);
     };
-    ($base:expr, $addr:expr, pub $name:ident($($aty:tt)*) -> $ret:ty) => {
-        do_addr_hook!(yes ~ cdecl, $base, $addr, $name, $ret, [$([$aty])*]);
+    ($abi:ident, $base:expr, $addr:expr, pub $name:ident($($aty:tt)*) -> $ret:ty) => {
+        do_addr_hook!(yes ~ $abi, $base, $addr, $name, $ret, [$([$aty])*]);
     };
-    ($base:expr, $addr:expr, $name:ident($($aty:tt)*)) => {
-        do_addr_hook!(no ~ cdecl, $base, $addr, $name, (), [$([$aty])*]);
+    ($abi:ident, $base:expr, $addr:expr, $name:ident($($aty:tt)*)) => {
+        do_addr_hook!(no ~ $abi, $base, $addr, $name, (), [$([$aty])*]);
     };
-    ($base:expr, $addr:expr, $name:ident($($aty:tt)*) -> $ret:ty) => {
-        do_addr_hook!(no ~ cdecl, $base, $addr, $name, $ret, [$([$aty])*]);
+    ($abi:ident, $base:expr, $addr:expr, $name:ident($($aty:tt)*) -> $ret:ty) => {
+        do_addr_hook!(no ~ $abi, $base, $addr, $name, $ret, [$([$aty])*]);
     };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! impl_address_hook {
+    ($name:ident, $ret:ty, [$($aty:ty),*], [$($an:ident),*]) => {
+        impl $crate::AddressHook for $name {
+            type Fnptr = unsafe fn($($aty),*) -> $ret;
+            type OptFnptr = unsafe fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
+            unsafe fn hook<'a>(self, patch: &mut $crate::ModulePatch<'a>, val: Self::Fnptr) -> $crate::Patch
+            {
+                patch.hook_closure(self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
+                    val($($an),*)
+                })
+            }
+            unsafe fn hook_opt<'a>(self, patch: &mut $crate::ModulePatch<'a>, val: Self::OptFnptr) -> $crate::Patch
+            {
+                patch.hook_closure(self, move |$($an,)* orig: &Fn($($aty),*) -> $ret| {
+                    val($($an,)* orig)
+                })
+            }
+        }
+    }
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! impl_export_hook {
+    ($name:ident, $ret:ty, [$($aty:ty),*], [$($an:ident),*]) => {
+        impl $crate::ExportHook for $name {
+            type Fnptr = unsafe fn($($aty),*) -> $ret;
+            type OptFnptr = unsafe fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
+            fn import<'a>(self, patch: &mut $crate::AnyModulePatch<'a>, dll: &[u8],
+                          val: Self::Fnptr) -> Option<$crate::Patch>
+            {
+                patch.import_hook_closure(dll, self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
+                    unsafe { val($($an),*) }
+                })
+            }
+            fn import_opt<'a>(self, patch: &mut $crate::AnyModulePatch<'a>, dll: &[u8],
+                          val: Self::OptFnptr) -> Option<$crate::Patch>
+            {
+                patch.import_hook_closure(dll, self, move |$($an,)* orig: &Fn($($aty),*) -> $ret| {
+                    unsafe { val($($an,)* orig) }
+                })
+            }
+        }
+    }
 }
 
 #[macro_export]
