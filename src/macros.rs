@@ -148,93 +148,139 @@ macro_rules! in_wrapper_ret_size {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! name_args {
-    // With @location
-    (nope, [$($other:tt),*], [$([$oki:ident @ $okl:ident / $imploc:ident: $okt:ty])*],
-        [@ $loc:ident $next_ty:ty, $($rest_args:tt)+],
+    // @ stack
+    (nope, $imp_stack_pos:expr, [$($other:tt),*],
+        [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
+        [@ stack($pos:expr) $next_ty:ty, $($rest_args:tt)+],
         [$next_id:ident, $($rest_id:ident),*],
-        [$next_loc:ident, $($rest_loc:ident),*]) =>
+        [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
-        name_args!(yup, [$($other),*],
-                  [$([$oki @ $imploc: $okt])* [$next_id @ $loc: $next_ty]],
+        name_args!(yup, $imp_stack_pos, [$($other),*],
+                  [$([$oki @ $imploc($impp): $okt])* [$next_id @ stack($pos): $next_ty]],
                   [$($rest_args)*], [$($rest_id),*]);
     };
-    (yup, [$($other:tt),*], [$([$oki:ident @ $okl:ident: $okt:ty])*],
+    (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
+        [@ stack($pos:expr) $next_ty:ty, $($rest_args:tt)+],
+        [$next_id:ident, $($rest_id:ident),*]) =>
+    {
+        name_args!(yup, $imp_stack_pos, [$($other),*],
+                  [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($pos): $next_ty]],
+                  [$($rest_args)*], [$($rest_id),*]);
+    };
+    // Last arg @ stack
+    (nope, $imp_stack_pos:expr, [$($other:tt),*],
+        [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
+        [@ stack($pos:expr) $next_ty:ty],
+        [$next_id:ident, $($rest_id:ident),*],
+        [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
+    {
+        name_args!(yup, $imp_stack_pos, [$($other),*],
+                  [$([$oki @ $imploc($impp): $okt])* [$next_id @ stack($pos): $next_ty]],
+                  [], [$($rest_id),*]);
+    };
+    (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
+        [@ stack($pos:expr) $next_ty:ty],
+        [$next_id:ident, $($rest_id:ident),*]) =>
+    {
+        name_args!(yup, $imp_stack_pos, [$($other),*],
+                  [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($pos): $next_ty]],
+                  [], [$($rest_id),*]);
+    };
+    // With @location
+    (nope, $imp_stack_pos:expr, [$($other:tt),*],
+        [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
+        [@ $loc:ident $next_ty:ty, $($rest_args:tt)+],
+        [$next_id:ident, $($rest_id:ident),*],
+        [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
+    {
+        name_args!(yup, $imp_stack_pos, [$($other),*],
+                  [$([$oki @ $imploc($impp): $okt])* [$next_id @ $loc(0): $next_ty]],
+                  [$($rest_args)*], [$($rest_id),*]);
+    };
+    (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
         [@ $loc:ident $next_ty:ty, $($rest_args:tt)+],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
-        name_args!(yup, [$($other),*],
-                  [$([$oki @ $okl: $okt])* [$next_id @ $loc: $next_ty]],
+        name_args!(yup, $imp_stack_pos, [$($other),*],
+                  [$([$oki @ $okl($okp): $okt])* [$next_id @ $loc(0): $next_ty]],
                   [$($rest_args)*], [$($rest_id),*]);
     };
     // Last arg @location
-    (nope, [$($other:tt),*], [$([$oki:ident @ $okl:ident / $imploc:ident: $okt:ty])*],
+    (nope, $imp_stack_pos:expr, [$($other:tt),*],
+        [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
         [@ $loc:ident $next_ty:ty],
         [$next_id:ident, $($rest_id:ident),*],
-        [$next_loc:ident, $($rest_loc:ident),*]) =>
+        [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
-        name_args!(yup, [$($other),*],
-                  [$([$oki @ $imploc: $okt])* [$next_id @ $loc: $next_ty]],
+        name_args!(yup, $imp_stack_pos, [$($other),*],
+                  [$([$oki @ $imploc($impp): $okt])* [$next_id @ $loc(0): $next_ty]],
                   [], [$($rest_id),*]);
     };
-    (yup, [$($other:tt),*], [$([$oki:ident @ $okl:ident: $okt:ty])*],
+    (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
         [@ $loc:ident $next_ty:ty],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
-        name_args!(yup, [$($other),*],
-                  [$([$oki @ $okl: $okt])* [$next_id @ $loc: $next_ty]],
+        name_args!(yup, $imp_stack_pos, [$($other),*],
+                  [$([$oki @ $okl($okp): $okt])* [$next_id @ $loc(0): $next_ty]],
                   [], [$($rest_id),*]);
     };
     // Without @location
-    (nope, [$($other:tt),*], [$([$oki:ident @ $okl:ident / $imploc:ident: $okt:ty])*],
+    (nope, $imp_stack_pos:expr, [$($other:tt),*],
+     [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
         [$next_ty:ty, $($rest_args:tt)+],
         [$next_id:ident, $($rest_id:ident),*],
-        [$next_loc:ident, $($rest_loc:ident),*]) =>
+        [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
-        name_args!(nope, [$($other),*],
-                  [$([$oki @ $okl / $imploc: $okt])* [$next_id @ $next_loc / stack: $next_ty]],
-                  [$($rest_args)*], [$($rest_id),*], [$($rest_loc),*]);
+        name_args!(nope, $imp_stack_pos + 1, [$($other),*],
+                  [$([$oki @ $okl($okp) / $imploc($impp): $okt])*
+                      [$next_id @ $next_loc($nextp) / stack($imp_stack_pos): $next_ty]],
+                  [$($rest_args)*], [$($rest_id),*], [$($rest_loc($rest_pos)),*]);
     };
-    (yup, [$($other:tt),*], [$([$oki:ident @ $okl:ident: $okt:ty])*],
+    (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
         [$next_ty:ty, $($rest_args:tt)+],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
-        name_args!(yup, [$($other),*],
-                  [$([$oki @ $okl: $okt])* [$next_id @ stack: $next_ty]],
+        name_args!(yup, $imp_stack_pos + 1, [$($other),*],
+                  [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($imp_stack_pos): $next_ty]],
                   [$($rest_args)*], [$($rest_id),*]);
     };
     // Last arg without @location
-    (nope, [$($other:tt),*], [$([$oki:ident @ $okl:ident / $imploc:ident: $okt:ty])*],
+    (nope, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
         [$next_ty:ty],
         [$next_id:ident, $($rest_id:ident),*],
-        [$next_loc:ident, $($rest_loc:ident),*]) =>
+        [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
-        name_args!(nope, [$($other),*],
-                  [$([$oki @ $okl / $imploc: $okt])* [$next_id @ $next_loc / stack: $next_ty]],
-                  [], [$($rest_id),*], [$($rest_loc),*]);
+        name_args!(nope, $imp_stack_pos + 1,
+                   [$($other),*],
+                   [$([$oki @ $okl($okp) / $imploc($impp): $okt])*
+                       [$next_id @ $next_loc($nextp) / stack($imp_stack_pos): $next_ty]],
+                   [], [$($rest_id),*], [$($rest_loc($rest_pos)),*]);
     };
-    (yup, [$($other:tt),*], [$([$oki:ident @ $okl:ident: $okt:ty])*],
+    (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
         [$next_ty:ty],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
-        name_args!(yup, [$($other),*],
-                  [$([$oki @ $okl: $okt])* [$next_id @ stack: $next_ty]],
+        name_args!(yup, $imp_stack_pos + 1, [$($other),*],
+                  [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($imp_stack_pos): $next_ty]],
                   [], [$($rest_id),*]);
     };
     // Finish
-    (nope, [addr, $($other:tt),*], [$([$oki:ident @ $okl:ident / $imploc:ident: $okt:ty])*], [],
-     [$($rest:ident),*], [$($rest_loc:ident),*]) => {
-        impl_addr_hook!($($other,)* $([$oki @ $okl: $okt])*);
+    (nope, $imp_stack_pos:expr, [addr, $($other:tt),*],
+     [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],
+     [$($rest:ident),*], [$($rest_loc:ident($rest_pos:expr)),*]) => {
+        impl_addr_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
     };
-    (yup, [addr, $($other:tt),*], [$([$oki:ident @ $okl:ident: $okt:ty])*], [],
+    (yup, $imp_stack_pos:expr, [addr, $($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
      [$($rest:ident),*]) => {
-        impl_addr_hook!($($other,)* $([$oki @ $okl: $okt])*);
+        impl_addr_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
     };
-    (nope, [imp, $($other:tt),*], [$([$oki:ident @ $okl:ident / $imploc:ident: $okt:ty])*], [],
-     [$($rest:ident),*], [$($rest_loc:ident),*]) => {
-        impl_import_hook!($($other,)* $([$oki @ $okl: $okt])*);
+    (nope, $imp_stack_pos:expr, [imp, $($other:tt),*],
+     [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],
+     [$($rest:ident),*], [$($rest_loc:ident($rest_pos:expr)),*]) => {
+        impl_import_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
     };
-    (yup, [imp, $($other:tt),*], [$([$oki:ident @ $okl:ident: $okt:ty])*], [],
+    (yup, $imp_stack_pos:expr, [imp, $($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
      [$($rest:ident),*]) => {
-        impl_import_hook!($($other,)* $([$oki @ $okl: $okt])*);
+        impl_import_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
     };
 }

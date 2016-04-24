@@ -34,6 +34,9 @@ mod hook_decl_tests {
         0x1233 => Empty();
         0x1233 => EmptyRetInt() -> u32;
         0x1233 => NoRet(u32);
+        0x1233 => StackSingle(@stack(1) u32);
+        0x1233 => StackSecond(u32, @stack(0) u32);
+        0x1233 => StackFirst(@stack(0) u32, u32);
     );
 }
 
@@ -44,6 +47,7 @@ mod hook_decl_tests_loc {
         0x1233 => NoRet(@ecx u32);
         0x2514 => Implicit(u32, @edi u32);
         0x2514 => Implicit2(@esi u32, u32);
+        0x1233 => StackAfterLoc(@ecx u32, @stack(0) u32);
     );
 }
 
@@ -54,6 +58,7 @@ mod hook_decl_tests_loc {
         0x1233 => NoRet(@rcx u32);
         0x2514 => Implicit(u32, @rdi u32);
         0x2514 => Implicit2(@rsi u32, u32);
+        0x1233 => StackAfterLoc(@rcx u32, @stack(0) u32);
     );
 }
 

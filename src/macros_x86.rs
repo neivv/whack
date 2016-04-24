@@ -34,26 +34,26 @@ macro_rules! call_const_size { () => { 5 } }
 #[doc(hidden)]
 macro_rules! impl_addr_hook {
     ($is_pub:ident, stdcall, $base:expr, $addr:expr, $name:ident, $ret:ty,
-        $([$an:ident @ $aloc:ident: $aty:ty])*) =>
+        $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) =>
     {
-        impl_addr_hook!(true, $is_pub, $base, $addr, $name, $ret, $([$an @ $aloc: $aty])*);
+        impl_addr_hook!(true, $is_pub, $base, $addr, $name, $ret, $([$an @ $aloc($apos): $aty])*);
     };
     ($is_pub:ident, cdecl, $base:expr, $addr:expr, $name:ident, $ret:ty,
-        $([$an:ident @ $aloc:ident: $aty:ty])*) =>
+        $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) =>
     {
-        impl_addr_hook!(false, $is_pub, $base, $addr, $name, $ret, $([$an @ $aloc: $aty])*);
+        impl_addr_hook!(false, $is_pub, $base, $addr, $name, $ret, $([$an @ $aloc($apos): $aty])*);
     };
     ($stdcall:expr, $is_pub:ident, $base:expr, $addr:expr, $name:ident, $ret:ty,
-        $([$an:ident @ $aloc:ident: $aty:ty])*) =>
+        $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) =>
     {
         maybe_pub_struct!($is_pub, $name);
-        hook_impl_private!(no, $stdcall, $name, $ret, $([$an @ $aloc: $aty])*);
+        hook_impl_private!(no, $stdcall, $name, $ret, $([$an @ $aloc($apos): $aty])*);
         impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::AddressHookClosure<T> for $name {
             fn address(current_base: usize) -> usize {
                 current_base.wrapping_sub($base).wrapping_add($addr)
             }
 
-            hook_wrapper_impl!(no, $stdcall, $name, $ret, $([$an @ $aloc: $aty])*);
+            hook_wrapper_impl!(no, $stdcall, $name, $ret, $([$an @ $aloc($apos): $aty])*);
         }
 
         impl_address_hook!($name, $ret, [$($aty),*], [$($an),*]);
@@ -63,12 +63,14 @@ macro_rules! impl_addr_hook {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! impl_import_hook {
-    ($is_pub:ident, system, $ord:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident: $aty:ty])*) => {
-        impl_import_hook!($is_pub, stdcall, $ord, $name, $ret, $([$an @ $aloc: $aty])*);
+    ($is_pub:ident, system, $ord:expr, $name:ident, $ret:ty,
+     $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
+        impl_import_hook!($is_pub, stdcall, $ord, $name, $ret, $([$an @ $aloc($apos): $aty])*);
     };
-    ($is_pub:ident, stdcall, $ord:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident: $aty:ty])*) => {
+    ($is_pub:ident, stdcall, $ord:expr, $name:ident, $ret:ty,
+     $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
         maybe_pub_struct!($is_pub, $name);
-        hook_impl_private!(yes, true, $name, $ret, $([$an @ $aloc: $aty])*);
+        hook_impl_private!(yes, true, $name, $ret, $([$an @ $aloc($apos): $aty])*);
         impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::ExportHookClosure<T> for $name {
             fn default_export() -> $crate::Export<'static> {
                 if $ord as i32 == -1 {
@@ -79,7 +81,7 @@ macro_rules! impl_import_hook {
                 }
             }
 
-            hook_wrapper_impl!(yes, true, $name, $ret, $([$an @ $aloc: $aty])*);
+            hook_wrapper_impl!(yes, true, $name, $ret, $([$an @ $aloc($apos): $aty])*);
         }
 
         impl_export_hook!($name, $ret, [$($aty),*], [$($an),*]);
@@ -89,7 +91,7 @@ macro_rules! impl_import_hook {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! hook_impl_private {
-    ($fnptr_hook:ident, $stdcall:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident: $aty:ty])*) => {
+    ($fnptr_hook:ident, $stdcall:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
         impl $name {
             // caller -> assembly wrap -> in_wrap -> hook.
             // If the hook wishes to call original function,
@@ -132,7 +134,7 @@ macro_rules! hook_impl_private {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! hook_wrapper_impl {
-    ($fnptr_hook:ident, $stdcall:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident: $aty:ty])*) => {
+    ($fnptr_hook:ident, $stdcall:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
         unsafe fn wrapper_size(orig: *const u8) -> usize {
             $name::in_asm_size() + $name::out_asm_size(orig) + ::std::mem::size_of::<T>() +
                 ::std::mem::size_of::<*const Fn($($aty,)* &Fn($($aty),*) -> $ret)>()
@@ -357,9 +359,10 @@ macro_rules! out_wrapper_args_size {
 macro_rules! impl_hook {
     ($is_pub:ident ~ $abi:ident, $ord:expr, $name:ident, $ret:ty, [$([$args:tt])*]) => {
         // Increase arg name count if needed...
-        name_args!(nope, [imp, $is_pub, $abi, $ord, $name, $ret], [], [$($args)*],
+        name_args!(nope, 0, [imp, $is_pub, $abi, $ord, $name, $ret], [], [$($args)*],
                    [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10],
-                   [stack, stack, stack, stack, stack, stack, stack, stack, stack, stack]);
+                   [stack(0), stack(1), stack(2), stack(3), stack(4),
+                   stack(5), stack(6), stack(7), stack(8), stack(9)]);
     };
 }
 
@@ -367,8 +370,9 @@ macro_rules! impl_hook {
 #[doc(hidden)]
 macro_rules! do_addr_hook {
     ($is_pub:ident ~ $abi:ident, $base:expr, $addr:expr, $name:ident, $ret:ty, [$([$args:tt])*]) => {
-        name_args!(nope, [addr, $is_pub, $abi, $base, $addr, $name, $ret], [], [$($args)*],
+        name_args!(nope, 0, [addr, $is_pub, $abi, $base, $addr, $name, $ret], [], [$($args)*],
                    [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10],
-                   [stack, stack, stack, stack, stack, stack, stack, stack, stack, stack]);
+                   [stack(0), stack(1), stack(2), stack(3), stack(4),
+                   stack(5), stack(6), stack(7), stack(8), stack(9)]);
     };
 }
