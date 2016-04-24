@@ -3,11 +3,12 @@
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::mem;
-use std::os::raw::c_void;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 use std::ptr;
 use std::slice;
+
+use libc::c_void;
 
 use kernel32;
 use rust_win32error::Win32Error;
@@ -102,7 +103,7 @@ pub struct MemoryProtection {
 
 impl MemoryProtection {
     pub fn new(start: HMODULE) -> MemoryProtection {
-        let start = start as *const c_void;
+        let start = start as winapi::LPVOID;
         let mut protections = Vec::new();
         unsafe {
             let mut mem_info: winapi::MEMORY_BASIC_INFORMATION = mem::uninitialized();
@@ -113,7 +114,7 @@ impl MemoryProtection {
                                          mem_info.RegionSize,
                                          winapi::PAGE_EXECUTE_READWRITE,
                                          &mut tmp);
-                protections.push((mem_info.BaseAddress, mem_info.RegionSize, mem_info.Protect));
+                protections.push((mem_info.BaseAddress as *mut c_void, mem_info.RegionSize, mem_info.Protect));
                 let next = mem_info.BaseAddress.offset(mem_info.RegionSize as isize);
                 kernel32::VirtualQuery(next, &mut mem_info, mem::size_of_val(&mem_info) as winapi::SIZE_T);
             }
@@ -129,7 +130,7 @@ impl Drop for MemoryProtection {
         unsafe {
             let mut tmp = 0;
             for tp in self.protections.iter() {
-                kernel32::VirtualProtect(tp.0, tp.1, tp.2, &mut tmp);
+                kernel32::VirtualProtect(tp.0 as winapi::LPVOID, tp.1, tp.2, &mut tmp);
             }
         }
     }

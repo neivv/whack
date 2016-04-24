@@ -1,4 +1,4 @@
-#![feature(libc, link_args, asm)]
+#![feature(link_args, asm)]
 #[link_args = "-static-libgcc"]
 extern {}
 extern crate libc;
