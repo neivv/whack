@@ -1,12 +1,14 @@
 #![feature(link_args, asm)]
 #[link_args = "-static-libgcc"]
 extern {}
+extern crate byteorder;
 extern crate libc;
 extern crate kernel32;
 extern crate winapi;
 extern crate rust_win32error;
 #[macro_use(defer)]
 extern crate scopeguard;
+extern crate smallvec;
 
 #[macro_use]
 mod macros;

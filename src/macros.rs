@@ -1,7 +1,9 @@
 pub trait AddressHookClosure<Callback> {
-    unsafe fn wrapper_size(orig: *const u8) -> usize;
     fn address(base: usize) -> usize;
-    unsafe fn write_wrapper(out: *mut u8, target: Callback, orig_addr: *mut u8);
+    unsafe fn write_wrapper(target: Callback,
+                            orig_addr: *mut u8,
+                            exec_heap: &mut ::platform::ExecutableHeap
+                           ) -> *const u8;
 }
 
 pub trait AddressHook {
@@ -12,9 +14,11 @@ pub trait AddressHook {
 }
 
 pub trait ExportHookClosure<Callback> {
-    unsafe fn wrapper_size(orig: *const u8) -> usize;
     fn default_export() -> ::Export<'static>;
-    unsafe fn write_wrapper(out: *mut u8, target: Callback, orig_addr: *mut u8);
+    unsafe fn write_wrapper(target: Callback,
+                            orig_addr: *mut u8,
+                            exec_heap: &mut ::platform::ExecutableHeap
+                           ) -> *const u8;
 }
 
 pub trait ExportHook {
@@ -140,6 +144,12 @@ macro_rules! in_wrapper_ret_size {
     };
 }
 
+#[macro_export]
+#[doc(hidden)]
+macro_rules! yes_no {
+    (yes) => { true };
+    (no) => { false };
+}
 
 /// Gives names to the argument types, and extracts their locations, if defined.
 /// If no locations are defined, they are assigned from [next_loc, rest_loc] list,
