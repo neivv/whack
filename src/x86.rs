@@ -1,4 +1,4 @@
-use std::{mem, ptr};
+use std::ptr;
 use std::io::Write;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -28,6 +28,7 @@ pub struct WrapAssembler {
     orig: *mut u8,
     fnptr_hook: bool,
     stdcall: bool,
+    preserve_regs: bool,
     args: SmallVec<[Location; 8]>,
 }
 
@@ -71,11 +72,12 @@ impl AsmValue {
 }
 
 impl WrapAssembler {
-    pub fn new(orig_addr: *mut u8, fnptr_hook: bool, stdcall: bool) -> WrapAssembler {
+    pub fn new(orig_addr: *mut u8, fnptr_hook: bool, stdcall: bool, preserve_regs: bool) -> WrapAssembler {
         WrapAssembler {
             orig: orig_addr,
             fnptr_hook: fnptr_hook,
             stdcall: stdcall,
+            preserve_regs: preserve_regs,
             args: SmallVec::new(),
         }
     }
@@ -93,6 +95,9 @@ impl WrapAssembler {
             .collect();
 
         let mut buffer = AssemblerBuf::new();
+        if self.preserve_regs {
+            buffer.pushad();
+        }
         let target_addr_pos = buffer.fixup_position();
         buffer.push(AsmValue::Undecided);
         let out_wrapper_pos = buffer.fixup_position();
@@ -102,7 +107,16 @@ impl WrapAssembler {
         }
         buffer.call(AsmValue::Constant(rust_in_wrapper as u32));
         buffer.stack_add((self.args.len() + 2) * 4);
-        buffer.ret(if self.stdcall { stack_args.len() * 4 } else { 0 });
+        if self.preserve_regs {
+            buffer.popad();
+            unsafe {
+                let len = copy_instruction_length(self.orig, 5);
+                buffer.copy_instructions(self.orig, len);
+                buffer.jump(AsmValue::Constant(self.orig as u32 + len as u32));
+            }
+        } else {
+            buffer.ret(if self.stdcall { stack_args.len() * 4 } else { 0 });
+        }
 
         buffer.reset_stack_offset();
         buffer.fixup_to_position(out_wrapper_pos);
@@ -169,7 +183,6 @@ impl WrapAssembler {
 pub struct AssemblerBuf {
     buf: Vec<u8>,
     fixups: SmallVec<[usize; 8]>,
-    relative_fixups: SmallVec<[usize; 8]>,
     stack_offset: i32,
 }
 
@@ -180,7 +193,6 @@ impl AssemblerBuf {
         AssemblerBuf {
             buf: Vec::with_capacity(128),
             fixups: SmallVec::new(),
-            relative_fixups: SmallVec::new(),
             stack_offset: 0,
         }
     }
@@ -224,12 +236,8 @@ impl AssemblerBuf {
             let prev = (&self.buf[fixup .. fixup + 4]).read_u32::<LittleEndian>().unwrap();
             (&mut self.buf[fixup .. fixup + 4]).write_u32::<LittleEndian>(prev.wrapping_add(diff as u32)).unwrap();
         }
-        for &fixup in self.relative_fixups.iter() {
-            let prev = (&self.buf[fixup .. fixup + 4]).read_u32::<LittleEndian>().unwrap();
-            (&mut self.buf[fixup .. fixup + 4]).write_u32::<LittleEndian>(prev.wrapping_sub(diff as u32)).unwrap();
-        }
         unsafe {
-            ptr::copy_nonoverlapping(self.buf.as_ptr(), data, self.buf.len());
+            copy_instructions(self.buf.as_ptr(), data, self.buf.len());
             write_target(data.offset(self.buf.len() as isize));
         }
         data
@@ -266,6 +274,16 @@ impl AssemblerBuf {
             }
         }
         self.stack_offset += 1;
+    }
+
+    pub fn pushad(&mut self) {
+        self.buf.write_u8(0x60).unwrap();
+        self.stack_offset += 8;
+    }
+
+    pub fn popad(&mut self) {
+        self.buf.write_u8(0x61).unwrap();
+        self.stack_offset -= 8;
     }
 
     pub fn mov(&mut self, to: AsmValue, from: AsmValue) {
@@ -334,7 +352,6 @@ impl AssemblerBuf {
         match target {
             AsmValue::Constant(dest) => {
                 self.buf.write_u8(0xe9).unwrap();
-                self.relative_fixups.push(self.buf.len());
                 let current_pos = self.buf.as_ptr() as u32 + self.buf.len() as u32;
                 let value = dest.wrapping_sub((current_pos).wrapping_add(4));
                 self.buf.write_u32::<LittleEndian>(value).unwrap();
@@ -350,7 +367,6 @@ impl AssemblerBuf {
         match target {
             AsmValue::Constant(dest) => {
                 self.buf.write_u8(0xe8).unwrap();
-                self.relative_fixups.push(self.buf.len());
                 let current_pos = self.buf.as_ptr() as u32 + self.buf.len() as u32;
                 let value = dest.wrapping_sub((current_pos).wrapping_add(4));
                 self.buf.write_u32::<LittleEndian>(value).unwrap();
@@ -375,7 +391,8 @@ unsafe fn x86_sib_ins_size(ins: *const u8) -> usize {
 
 unsafe fn x86_ins_size(ins: *const u8) -> usize {
     match *ins {
-        0x50 ... 0x61 | 0x90 => 1,
+        0x50 ... 0x61 | 0x90 | 0xc3 | 0xcc => 1,
+        0xc2 => 3,
         0x68 => 5,
         0x00 ... 0x03 | 0x84 ... 0x8f | 0xff => x86_sib_ins_size(ins),
         0x83 | 0xc0 | 0xc1 | 0xc6 => x86_sib_ins_size(ins) + 1,
@@ -402,9 +419,9 @@ unsafe fn copy_instructions(mut src: *const u8, mut dst: *mut u8, len: usize) {
             0xe8 | 0xe9 => {
                 assert!(ins_len == 5);
                 ptr::copy_nonoverlapping(src, dst, 5);
-                let diff = mem::transmute::<_, usize>(dst).overflowing_sub(mem::transmute(src)).0;
-                let jump_offset: *mut usize = mem::transmute(dst.offset(1));
-                *jump_offset = (*jump_offset).overflowing_sub(diff).0;
+                let diff = (dst as usize).wrapping_sub(src as usize);
+                let value = *(dst.offset(1) as *mut usize);
+                *(dst.offset(1) as *mut usize) = value.wrapping_sub(diff);
 
             }
             _ => ptr::copy_nonoverlapping(src, dst, ins_len as usize),

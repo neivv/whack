@@ -105,11 +105,14 @@ macro_rules! hook_wrapper_impl {
      $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) =>
     {
         #[allow(unused_mut)]
-        unsafe fn write_wrapper(target: T, orig_addr: *mut u8,
+        unsafe fn write_wrapper(preserve_regs: bool, target: T, orig_addr: *mut u8,
                                 exec_heap: &mut $crate::platform::ExecutableHeap) -> *const u8 {
             let fnptr_hook = yes_no!($fnptr_hook);
             let in_wrap_addr = $name::in_wrap as *const u8;
-            let mut wrapper = $crate::platform::WrapAssembler::new(orig_addr, fnptr_hook, false);
+            let mut wrapper = $crate::platform::WrapAssembler::new(orig_addr,
+                                                                   fnptr_hook,
+                                                                   false,
+                                                                   preserve_regs);
             hook_initialize_wrapper!(wrapper, [$($aloc, $apos),*]);
             let target_size = ::std::mem::size_of::<T>() +
                 ::std::mem::size_of::<*const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret>();

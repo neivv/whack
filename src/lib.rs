@@ -359,8 +359,14 @@ impl<'a> ModulePatch<'a> {
     /// Hooks a function, replacing it with `target`.
     pub unsafe fn hook_closure<H, T>(&mut self, _hook: H, target: T) -> Patch
     where H: AddressHookClosure<T> {
+        self.hook_closure_internal(false, _hook, target)
+    }
+    /// Public only for call hooks
+    #[doc(hidden)]
+    pub unsafe fn hook_closure_internal<H, T>(&mut self, preserve_regs: bool, _hook: H, target: T) -> Patch
+    where H: AddressHookClosure<T> {
         let func = H::address(self.base);
-        let wrapper = platform::jump_hook::<H, T>(func, target, self.exec_heap);
+        let wrapper = platform::jump_hook::<H, T>(func, target, self.exec_heap, preserve_regs);
         let patch = Arc::new(PatchHistory {
             ty: PatchType::BasicHook(func - self.base, wrapper),
             all_modules_id: 0,
@@ -380,6 +386,12 @@ impl<'a> ModulePatch<'a> {
     where H: AddressHook,
     {
         _hook.hook_opt(self, target)
+    }
+
+    pub unsafe fn call_hook<H>(&mut self, _hook: H, target: H::Fnptr) -> Patch
+    where H: AddressHook,
+    {
+        _hook.call_hook(self, target)
     }
 
     fn any_module_downgrade(&mut self, all_modules_id: u32) -> AnyModulePatch {

@@ -1,6 +1,7 @@
 pub trait AddressHookClosure<Callback> {
     fn address(base: usize) -> usize;
-    unsafe fn write_wrapper(target: Callback,
+    unsafe fn write_wrapper(preserve_regs: bool,
+                            target: Callback,
                             orig_addr: *mut u8,
                             exec_heap: &mut ::platform::ExecutableHeap
                            ) -> *const u8;
@@ -11,11 +12,13 @@ pub trait AddressHook {
     type OptFnptr;
     unsafe fn hook<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::Fnptr) -> ::Patch;
     unsafe fn hook_opt<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::OptFnptr) -> ::Patch;
+    unsafe fn call_hook<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::Fnptr) -> ::Patch;
 }
 
 pub trait ExportHookClosure<Callback> {
     fn default_export() -> ::Export<'static>;
-    unsafe fn write_wrapper(target: Callback,
+    unsafe fn write_wrapper(preserve_regs: bool,
+                            target: Callback,
                             orig_addr: *mut u8,
                             exec_heap: &mut ::platform::ExecutableHeap
                            ) -> *const u8;
@@ -95,6 +98,12 @@ macro_rules! impl_address_hook {
             {
                 patch.hook_closure(self, move |$($an,)* orig: &Fn($($aty),*) -> $ret| {
                     val($($an,)* orig)
+                })
+            }
+            unsafe fn call_hook<'a>(self, patch: &mut $crate::ModulePatch<'a>, val: Self::Fnptr) -> $crate::Patch
+            {
+                patch.hook_closure_internal(true, self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
+                    val($($an),*)
                 })
             }
         }

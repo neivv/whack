@@ -152,11 +152,12 @@ pub unsafe fn redirect_stderr(filename: &Path) -> bool {
 }
 
 pub unsafe fn jump_hook<H: AddressHookClosure<T>, T>(func: usize,
-                                              target: T,
-                                              exec_heap: &mut ExecutableHeap
-                                             ) -> usize
+                                                     target: T,
+                                                     exec_heap: &mut ExecutableHeap,
+                                                     preserve_regs: bool,
+                                                    ) -> usize
 {
-    H::write_wrapper(target, func as *mut u8, exec_heap) as usize
+    H::write_wrapper(preserve_regs, target, func as *mut u8, exec_heap) as usize
 }
 
 pub unsafe fn import_hook<H: ExportHookClosure<T>, T>(base_addr: usize,
@@ -183,7 +184,7 @@ pub unsafe fn import_hook<H: ExportHookClosure<T>, T>(base_addr: usize,
 
     pe::import_ptr(base_addr, &func_dll_with_extension, func).map(|ptr| {
         let orig = *ptr;
-        let wrapper_memory = H::write_wrapper(target, orig as *mut u8, exec_heap);
+        let wrapper_memory = H::write_wrapper(false, target, orig as *mut u8, exec_heap);
         *ptr = wrapper_memory as usize;
         PatchType::Import(ptr as usize - base_addr, orig, wrapper_memory as usize)
     })

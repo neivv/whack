@@ -18,6 +18,7 @@ pub struct WrapAssembler {
     orig: *mut u8,
     fnptr_hook: bool,
     stdcall: bool,
+    preserve_regs: bool,
     args: SmallVec<[Location; 8]>,
 }
 
@@ -61,11 +62,12 @@ impl AsmValue {
 }
 
 impl WrapAssembler {
-    pub fn new(orig_addr: *mut u8, fnptr_hook: bool, stdcall: bool) -> WrapAssembler {
+    pub fn new(orig_addr: *mut u8, fnptr_hook: bool, stdcall: bool, preserve_regs: bool) -> WrapAssembler {
         WrapAssembler {
             orig: orig_addr,
             fnptr_hook: fnptr_hook,
             stdcall: stdcall,
+            preserve_regs: preserve_regs,
             args: SmallVec::new(),
         }
     }
@@ -83,6 +85,9 @@ impl WrapAssembler {
             .collect();
 
         let mut buffer = AssemblerBuf::new();
+        if self.preserve_regs {
+            buffer.pushad();
+        }
         let target_addr_pos = buffer.fixup_position();
         match self.args.len() {
             0 => buffer.mov(AsmValue::Register(2), AsmValue::Undecided),
@@ -116,7 +121,16 @@ impl WrapAssembler {
         buffer.stack_sub(0x20);
         buffer.call(AsmValue::Constant(rust_in_wrapper as u64));
         buffer.stack_add(::std::cmp::max((self.args.len() + 2) * 8, 0x20));
-        buffer.ret(if self.stdcall { stack_args.len() * 8 } else { 0 });
+        if self.preserve_regs {
+            buffer.popad();
+            unsafe {
+                let len = ins_len(self.orig, 6 + 8);
+                buffer.copy_instructions(self.orig, len);
+                buffer.jump(AsmValue::Constant(self.orig as u64 + len as u64));
+            }
+        } else {
+            buffer.ret(if self.stdcall { stack_args.len() * 8 } else { 0 });
+        }
 
         buffer.reset_stack_offset();
         buffer.fixup_to_position(out_wrapper_pos);
@@ -304,6 +318,32 @@ impl AssemblerBuf {
             }
         }
         self.stack_offset += 1;
+    }
+
+    pub fn pushad(&mut self) {
+        for x in 0x50..0x55 {
+            self.buf.write_u8(x).unwrap();
+        }
+        // Skip rsp
+        for x in 0x56..0x58 {
+            self.buf.write_u8(x).unwrap();
+        }
+        for x in 0x50..0x58 {
+            self.buf.write(&[0x41, x]).unwrap();
+        }
+    }
+
+    pub fn popad(&mut self) {
+        for x in (0x58..0x60).rev() {
+            self.buf.write(&[0x41, x]).unwrap();
+        }
+        for x in (0x5e..0x60).rev() {
+            self.buf.write_u8(x).unwrap();
+        }
+        // Skip rsp
+        for x in (0x58..0x5d).rev() {
+            self.buf.write_u8(x).unwrap();
+        }
     }
 
     pub fn mov(&mut self, to: AsmValue, from: AsmValue) {
