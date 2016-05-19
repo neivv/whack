@@ -158,9 +158,10 @@ macro_rules! impl_hook {
     ($is_pub:ident ~ $abi:ident, $ord:expr, $name:ident, $ret:ty, [$([$args:tt])*]) => {
         // Increase arg name count if needed...
         name_args!(nope, 0, [imp, $is_pub, $abi, $ord, $name, $ret], [], [$($args)*],
-                   [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10],
+                   [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11],
                    [stack(0), stack(1), stack(2), stack(3), stack(4),
-                   stack(5), stack(6), stack(7), stack(8), stack(9)]);
+                   stack(5), stack(6), stack(7), stack(8), stack(9),
+                   stack(10)]);
     };
 }
 
@@ -169,8 +170,9 @@ macro_rules! impl_hook {
 macro_rules! do_addr_hook {
     ($is_pub:ident ~ $abi:ident, $base:expr, $addr:expr, $name:ident, $ret:ty, [$([$args:tt])*]) => {
         name_args!(nope, 0, [addr, $is_pub, $abi, $base, $addr, $name, $ret], [], [$($args)*],
-                   [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10],
+                   [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11],
                    [stack(0), stack(1), stack(2), stack(3), stack(4),
-                   stack(5), stack(6), stack(7), stack(8), stack(9)]);
+                   stack(5), stack(6), stack(7), stack(8), stack(9),
+                   stack(10)]);
     };
 }
