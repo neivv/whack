@@ -262,16 +262,13 @@ impl<'a> ActivePatcher<'a> {
 
     /// Hackish way to support weird calling conventions that some callbacks may require.
     /// (Or fastcall ._.)
-    pub fn callback_hook<Hook>(&mut self, _hook: Hook, target: Hook::Target) -> *const u8
-    where Hook: HookableAsmWrap {
-        let state = &mut *self.state;
-        let mut patch = ModulePatch {
-            parent_patches: find_or_create_mod_patch_vec(&mut state.patches, None),
-            exec_heap: &mut state.exec_heap,
-            automatic_library_patches: &state.automatic_library_patches,
-            base: 0,
-        };
-        unsafe { mem::transmute(patch.make_hook_wrapper::<Hook>(target)) }
+    ///
+    /// Returns a wrapper that accepts calling convetion specified by `_hook`, calling
+    /// `target`. Only unsafe function pointers are accepted.
+    pub fn custom_calling_convention<H>(&mut self, _hook: H, target: H::Fnptr) -> *const u8
+    where H: AddressHook,
+    {
+        unsafe { _hook.custom_calling_convention(target, &mut self.state.exec_heap) }
     }
 }
 
@@ -366,7 +363,10 @@ impl<'a> ModulePatch<'a> {
     pub unsafe fn hook_closure_internal<H, T>(&mut self, preserve_regs: bool, _hook: H, target: T) -> Patch
     where H: AddressHookClosure<T> {
         let func = H::address(self.base);
-        let wrapper = platform::jump_hook::<H, T>(func, target, self.exec_heap, preserve_regs);
+        let wrapper = platform::jump_hook::<H, T>(Some(func as *mut u8),
+                                                  target,
+                                                  self.exec_heap,
+                                                  preserve_regs);
         let patch = Arc::new(PatchHistory {
             ty: PatchType::BasicHook(func - self.base, wrapper),
             all_modules_id: 0,
@@ -401,45 +401,6 @@ impl<'a> ModulePatch<'a> {
             base: self.base,
             all_modules_id: all_modules_id
         }
-    }
-
-    unsafe fn make_hook_wrapper<Hook>(&mut self, target: Hook::Target) -> *mut u8 where
-        Hook: HookableAsmWrap
-    {
-        let mut hook_ptr: *mut u8 = mem::transmute(&target);
-        let mut code = Hook::get_hook_wrapper();
-        let mut code_size = 0;
-        while *code != 0xcc { code = code.offset(1); }
-        code = code.offset(1);
-        let mut hook_pos = code;
-        while *hook_pos != 0xcc { hook_pos = hook_pos.offset(1); code_size += 1; }
-        let mut code_end = hook_pos;
-        while *code_end == 0xcc { code_end = code_end.offset(1); code_size += 1; }
-        while *code_end != 0xcc { code_end = code_end.offset(1); code_size += 1; }
-        let data = self.alloc_exec(code_size);
-        let mut data_pos = data;
-
-        while code != hook_pos {
-            *data_pos = *code;
-            code = code.offset(1);
-            data_pos = data_pos.offset(1);
-        }
-        while *code == 0xcc {
-            *data_pos = *hook_ptr;
-            hook_ptr = hook_ptr.offset(1);
-            code = code.offset(1);
-            data_pos = data_pos.offset(1);
-        }
-        while code != code_end {
-            *data_pos = *code;
-            code = code.offset(1);
-            data_pos = data_pos.offset(1);
-        }
-        data
-    }
-
-    fn alloc_exec(&mut self, size: usize) -> *mut u8 {
-        self.exec_heap.allocate(size)
     }
 }
 

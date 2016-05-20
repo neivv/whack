@@ -132,63 +132,66 @@ impl WrapAssembler {
             buffer.ret(if self.stdcall { stack_args.len() * 8 } else { 0 });
         }
 
-        buffer.reset_stack_offset();
-        buffer.fixup_to_position(out_wrapper_pos);
-        // Push stack args.
-        // Takes possible empty spots into account, so it became kind of complicated.
-        stack_args.sort_by_key(|&(_, target_pos)| target_pos);
-        for (pos, diff) in stack_args.last()
-            .map(|&(pos, _)| (pos, 1))
-            .into_iter()
-            .chain(stack_args
-                   .windows(2)
-                   .rev()
-                   .map(|tp| (tp[0].0, tp[1].1 - tp[0].1))
-            ) {
-            if diff > 1 {
-                buffer.stack_sub(diff as usize - 1);
+        // Don't write out wrappers for calling convention hacks
+        if self.orig != ptr::null_mut() {
+            buffer.reset_stack_offset();
+            buffer.fixup_to_position(out_wrapper_pos);
+            // Push stack args.
+            // Takes possible empty spots into account, so it became kind of complicated.
+            stack_args.sort_by_key(|&(_, target_pos)| target_pos);
+            for (pos, diff) in stack_args.last()
+                .map(|&(pos, _)| (pos, 1))
+                .into_iter()
+                .chain(stack_args
+                       .windows(2)
+                       .rev()
+                       .map(|tp| (tp[0].0, tp[1].1 - tp[0].1))
+                ) {
+                if diff > 1 {
+                    buffer.stack_sub(diff as usize - 1);
+                }
+                let src = match pos {
+                    0 => AsmValue::Register(1),
+                    1 => AsmValue::Register(2),
+                    2 => AsmValue::Register(8),
+                    3 => AsmValue::Register(9),
+                    _ => AsmValue::Stack(pos as i16),
+                };
+                buffer.push(src);
             }
-            let src = match pos {
-                0 => AsmValue::Register(1),
-                1 => AsmValue::Register(2),
-                2 => AsmValue::Register(8),
-                3 => AsmValue::Register(9),
-                _ => AsmValue::Stack(pos as i16),
-            };
-            buffer.push(src);
-        }
-        for (pos, val) in self.args
-                .iter()
-                .enumerate()
-                .filter_map(|(pos, x)| x.reg_to_opt().map(|x| (pos, x))) {
-            // TODO: Can't handle registers going weirdly yet
-            let src = match pos {
-                0 => AsmValue::Register(1),
-                1 => AsmValue::Register(2),
-                2 => AsmValue::Register(8),
-                3 => AsmValue::Register(9),
-                _ => AsmValue::Stack(pos as i16),
-            };
-            buffer.mov(AsmValue::Register(val), src);
-        }
-        buffer.stack_sub(stack_args.first().map(|x| x.1 as usize).unwrap_or(0x4) * 8);
-        if !self.fnptr_hook {
-            // Push return address manually
-            unsafe {
-                let len = ins_len(self.orig, 6 + 8);
-                let ret_address = buffer.fixup_position();
-                buffer.push(AsmValue::Undecided);
-                buffer.copy_instructions(self.orig, len);
-                buffer.jump(AsmValue::Constant(self.orig as u64 + len as u64));
-                buffer.fixup_to_position(ret_address);
+            for (pos, val) in self.args
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(pos, x)| x.reg_to_opt().map(|x| (pos, x))) {
+                // TODO: Can't handle registers going weirdly yet
+                let src = match pos {
+                    0 => AsmValue::Register(1),
+                    1 => AsmValue::Register(2),
+                    2 => AsmValue::Register(8),
+                    3 => AsmValue::Register(9),
+                    _ => AsmValue::Stack(pos as i16),
+                };
+                buffer.mov(AsmValue::Register(val), src);
             }
-        } else {
-            buffer.call(AsmValue::Constant(self.orig as u64));
-        };
-        buffer.stack_add(if self.stdcall { 0 } else {
-            stack_args.last().map(|x| (x.1 + 1) as usize * 8).unwrap_or(0x20)
-        });
-        buffer.ret(0);
+            buffer.stack_sub(stack_args.first().map(|x| x.1 as usize).unwrap_or(0x4) * 8);
+            if !self.fnptr_hook {
+                // Push return address manually
+                unsafe {
+                    let len = ins_len(self.orig, 6 + 8);
+                    let ret_address = buffer.fixup_position();
+                    buffer.push(AsmValue::Undecided);
+                    buffer.copy_instructions(self.orig, len);
+                    buffer.jump(AsmValue::Constant(self.orig as u64 + len as u64));
+                    buffer.fixup_to_position(ret_address);
+                }
+            } else {
+                buffer.call(AsmValue::Constant(self.orig as u64));
+            };
+            buffer.stack_add(if self.stdcall { 0 } else {
+                stack_args.last().map(|x| (x.1 + 1) as usize * 8).unwrap_or(0x20)
+            });
+            buffer.ret(0);
+        }
         buffer.align(16);
         buffer.write_fixups();
         buffer.fixup_to_position(target_addr_pos);

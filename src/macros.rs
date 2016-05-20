@@ -2,7 +2,7 @@ pub trait AddressHookClosure<Callback> {
     fn address(base: usize) -> usize;
     unsafe fn write_wrapper(preserve_regs: bool,
                             target: Callback,
-                            orig_addr: *mut u8,
+                            orig_addr: Option<*mut u8>,
                             exec_heap: &mut ::platform::ExecutableHeap
                            ) -> *const u8;
 }
@@ -13,13 +13,17 @@ pub trait AddressHook {
     unsafe fn hook<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::Fnptr) -> ::Patch;
     unsafe fn hook_opt<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::OptFnptr) -> ::Patch;
     unsafe fn call_hook<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::Fnptr) -> ::Patch;
+    unsafe fn custom_calling_convention<'a>(self,
+                                            val: Self::Fnptr,
+                                            exec_heap: &mut ::platform::ExecutableHeap
+                                            ) -> *const u8;
 }
 
 pub trait ExportHookClosure<Callback> {
     fn default_export() -> ::Export<'static>;
     unsafe fn write_wrapper(preserve_regs: bool,
                             target: Callback,
-                            orig_addr: *mut u8,
+                            orig_addr: Option<*mut u8>,
                             exec_heap: &mut ::platform::ExecutableHeap
                            ) -> *const u8;
 }
@@ -105,6 +109,16 @@ macro_rules! impl_address_hook {
                 patch.hook_closure_internal(true, self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
                     val($($an),*)
                 })
+            }
+            unsafe fn custom_calling_convention<'a>(self,
+                                                    val: Self::Fnptr,
+                                                    exec_heap: &mut $crate::platform::ExecutableHeap
+                                                    ) -> *const u8
+            {
+                let target = move |$($an,)* _: &Fn($($aty),*) -> $ret| {
+                    val($($an),*)
+                };
+                $crate::platform::jump_hook::<Self, _>(None, target, exec_heap, false) as *const u8
             }
         }
     }

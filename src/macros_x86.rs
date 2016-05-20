@@ -29,7 +29,9 @@ macro_rules! impl_addr_hook {
     {
         maybe_pub_struct!($is_pub, $name);
         hook_impl_private!(no, $stdcall, $name, $ret, $([$an @ $aloc($apos): $aty])*);
-        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::AddressHookClosure<T> for $name {
+        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static>
+            $crate::AddressHookClosure<T> for $name
+        {
             fn address(current_base: usize) -> usize {
                 current_base.wrapping_sub($base).wrapping_add($addr)
             }
@@ -100,11 +102,14 @@ macro_rules! hook_impl_private {
 macro_rules! hook_wrapper_impl {
     ($fnptr_hook:ident, $stdcall:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
         #[allow(unused_mut)]
-        unsafe fn write_wrapper(preserve_regs: bool, target: T, orig_addr: *mut u8,
+        unsafe fn write_wrapper(preserve_regs: bool,
+                                target: T,
+                                orig_addr: Option<*mut u8>,
                                 exec_heap: &mut $crate::platform::ExecutableHeap) -> *const u8 {
             let fnptr_hook = yes_no!($fnptr_hook);
             let in_wrap_addr = $name::in_wrap as *const u8;
-            let mut wrapper = $crate::platform::WrapAssembler::new(orig_addr,
+            let orig = orig_addr.unwrap_or(::std::ptr::null_mut());
+            let mut wrapper = $crate::platform::WrapAssembler::new(orig,
                                                                    fnptr_hook,
                                                                    $stdcall,
                                                                    preserve_regs);
@@ -121,7 +126,9 @@ macro_rules! hook_wrapper_impl {
                 ::std::ptr::copy_nonoverlapping(&target_ptr, ptr_pos, 1);
                 ::std::mem::forget(target_ptr);
             });
-            write_hooking_jump!($fnptr_hook, orig_addr, in_wrapper);
+            if let Some(_orig_addr) = orig_addr {
+                write_hooking_jump!($fnptr_hook, _orig_addr, in_wrapper);
+            }
             in_wrapper
         }
     }
