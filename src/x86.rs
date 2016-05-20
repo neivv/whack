@@ -392,14 +392,23 @@ unsafe fn x86_sib_ins_size(ins: *const u8) -> usize {
     }
 }
 
+unsafe fn x86_ext_ins_size(ins: *const u8) -> usize {
+    match *ins.offset(1) {
+        0xb6 | 0xb7 => x86_sib_ins_size(ins) + 1,
+        n => panic!("Unimpl ext ins size 0x{:x}", n),
+    }
+}
+
 unsafe fn x86_ins_size(ins: *const u8) -> usize {
     match *ins {
+        0xf => x86_ext_ins_size(ins),
         0x50 ... 0x61 | 0x90 | 0xc3 | 0xcc => 1,
         0xc2 => 3,
         0x68 => 5,
         0x00 ... 0x03 | 0x84 ... 0x8f | 0xff => x86_sib_ins_size(ins),
         0x83 | 0xc0 | 0xc1 | 0xc6 => x86_sib_ins_size(ins) + 1,
         0x81 => x86_sib_ins_size(ins) + 4,
+        0xc7 => x86_sib_ins_size(ins) + 4,
         0xa1 | 0xb9 | 0xba | 0xe8 | 0xe9 => 5,
         n => panic!("Unimpl ins size 0x{:x}", n),
     }
