@@ -150,6 +150,89 @@ macro_rules! impl_export_hook {
 }
 
 #[macro_export]
+macro_rules! whack_funcs {
+    (stdcall, $init_fn:ident, $base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
+        $(whack_fn!(pub $name($($args)*) $(-> $ret)*);)*
+        pub unsafe fn $init_fn(patch: &mut $crate::ModulePatch) {
+            let diff = patch.base() - $base;
+            let buf = $crate::platform::FuncAssembler::new();
+            $(whack_fnwrap_write!(true, $addr as usize, buf, diff, [$($args)*]);)*
+            buf.write(patch);
+            $(whack_fnwrap_finish!($name, buf);)*
+        }
+    };
+    ($init_fn:ident, $base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
+        $(whack_fn!(pub $name($($args)*) $(-> $ret)*);)*
+        pub unsafe fn $init_fn(patch: &mut $crate::ModulePatch) {
+            let diff = patch.base() - $base;
+            let mut buf = $crate::platform::FuncAssembler::new();
+            $(whack_fnwrap_write!(false, $addr as usize, buf, diff, [$($args)*]);)*
+            let funcs = buf.write(patch) as usize;
+            $(whack_fnwrap_finish!($name, buf, funcs);)*
+        }
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! whack_fnwrap_write {
+    ($is_stdcall:expr, $addr:expr, $buf:expr, $diff:expr, [$($args:tt)*]) => {
+        $buf.new_fnwrap();
+        whack_name_args!([fnwrap, $is_stdcall, $addr, $buf, $diff], [$([$args])*]);
+    }
+}
+
+/// Updates function pointers so they point to the exec memory which was just generated.
+/// `buf.next_address` should just give next function offset every time
+#[macro_export]
+#[doc(hidden)]
+macro_rules! whack_fnwrap_finish {
+    ($name:ident, $buf:expr, $funcs:expr) => {
+        $name.0 = $funcs + $buf.next_offset();
+    }
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! whack_fn {
+    (pub $name:ident($($args:tt)*)) => {
+        whack_fn!($abi, pub $name($($args)*) -> ());
+    };
+    (pub $name:ident($($args:tt)*) -> $ret:ty) => {
+        whack_name_args!([fndecl, $name, $ret], [$([$args])*]);
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! whack_fndecl {
+    ($name:ident, $ret:ty, $([$args:ty])*) => {
+        pub static mut $name: $crate::Func<extern fn($($args),*) -> $ret> =
+            $crate::Func(0, ::std::marker::PhantomData);
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! whack_fnwrap_write_separated {
+    ($is_stdcall:expr, $addr:expr, $buf:expr, $diff:expr, $([$argloc:ident ~ $argpos:expr])*) => {{
+        $(whack_fnwrap_write_arg!($is_stdcall, $addr, $buf, [$argloc ~ $argpos]);)*
+        $buf.finish_fnwrap($addr.wrapping_add($diff), $is_stdcall);
+    }}
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! whack_fnwrap_write_arg {
+    ($is_stdcall:expr, $addr:expr, $buf:expr, [stack ~ $apos:expr]) => {{
+        $buf.stack($apos);
+    }};
+    ($is_stdcall:expr, $addr:expr, $buf:expr, [$aloc:ident ~ $apos:expr]) => {{
+        $buf.register(reg_id!($aloc));
+    }};
+}
+
+#[macro_export]
 #[doc(hidden)]
 macro_rules! maybe_pub_struct {
     (yes, $name:ident) => { pub struct $name; };
@@ -315,5 +398,23 @@ macro_rules! whack_name_args_recurse {
     (yup, $imp_stack_pos:expr, [imp, $($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
      [$($rest:ident),*]) => {
         impl_import_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
+    };
+    (nope, $imp_stack_pos:expr, [fnwrap, $($other:tt),*],
+     [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],
+     [$($rest:ident),*], [$($rest_loc:ident($rest_pos:expr)),*]) => {
+        whack_fnwrap_write_separated!($($other,)* $([$okl ~ $okp])*);
+    };
+    (yup, $imp_stack_pos:expr, [fnwrap, $($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
+     [$($rest:ident),*]) => {
+        whack_fnwrap_write_separated!($($other,)* $([$okl ~ $okp])*);
+    };
+    (nope, $imp_stack_pos:expr, [fndecl, $($other:tt),*],
+     [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],
+     [$($rest:ident),*], [$($rest_loc:ident($rest_pos:expr)),*]) => {
+        whack_fndecl!($($other,)* $([$okt])*);
+    };
+    (yup, $imp_stack_pos:expr, [fndecl, $($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
+     [$($rest:ident),*]) => {
+        whack_fndecl!($($other,)* $([$okt])*);
     };
 }

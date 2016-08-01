@@ -1,9 +1,11 @@
+use std::mem;
 use std::ptr;
 use std::io::Write;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use smallvec::SmallVec;
 
+use ModulePatch;
 pub use win_common::*;
 
 pub fn nop() -> u8 {
@@ -24,12 +26,31 @@ pub unsafe fn write_jump(from: *mut u8, to: *const u8) -> *mut u8 {
     from.offset(5)
 }
 
+fn is_preserved_reg(reg: u8) -> bool {
+    match reg {
+        0 | 1 | 2 => false,
+        _ => true,
+    }
+}
+
 pub struct WrapAssembler {
     orig: *mut u8,
     fnptr_hook: bool,
     stdcall: bool,
     preserve_regs: bool,
     args: SmallVec<[Location; 8]>,
+}
+
+pub struct FuncAssembler {
+    buf: AssemblerBuf,
+    // (signature_pos, stack_pos)
+    // e.g. fn(@stack(2) i32, @eax i32, @ecx i32, @stack(1) i32)
+    // would have (0, 2), (3, 1).
+    current_stack: SmallVec<[(u8, u8); 8]>,
+    preserved_regs: SmallVec<[(u8); 8]>,
+    arg_num: u8,
+    func_offsets: Vec<usize>,
+    offset_pos: usize,
 }
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
@@ -183,6 +204,79 @@ impl WrapAssembler {
     }
 }
 
+// Currently really similar impl as in x86_64.rs
+impl FuncAssembler {
+    pub fn new() -> FuncAssembler {
+        FuncAssembler {
+            buf: AssemblerBuf::new(),
+            current_stack: SmallVec::new(),
+            preserved_regs: SmallVec::new(),
+            arg_num: 0,
+            func_offsets: Vec::with_capacity(64),
+            offset_pos: 0,
+        }
+    }
+
+    // Pushes are written at once in `finish_fnwrap`.
+    pub fn stack(&mut self, pos: i32) {
+        self.current_stack.push((self.arg_num, pos as u8));
+        self.arg_num += 1;
+    }
+
+    pub fn register(&mut self, reg: u8) {
+        if is_preserved_reg(reg) {
+            self.buf.push(AsmValue::Register(reg));
+            self.preserved_regs.push(reg);
+        }
+        self.buf.mov(AsmValue::Register(reg), AsmValue::Stack(self.arg_num as i16));
+        self.arg_num += 1;
+    }
+
+    pub fn new_fnwrap(&mut self) {
+        self.buf.reset_stack_offset();
+        self.func_offsets.push(self.buf.len());
+        self.current_stack.clear();
+        self.preserved_regs.clear();
+        self.arg_num = 0;
+    }
+
+    pub fn finish_fnwrap(&mut self, addr: usize, stdcall: bool) {
+        let ptr_size = mem::size_of::<usize>();
+        self.current_stack.sort_by_key(|&(_, x)| x);
+        for (signature_pos, skipped_args) in
+            self.current_stack.windows(2).rev()
+            .map(|window| (window[0], window[1]))
+            // `skipped_args` is the count of unused stack arg positions in between these
+            // two which are used.
+            .map(|((_, next_pos), (sign_pos, pos))| (sign_pos, pos - next_pos - 1))
+            // Special case for the first stack pos.
+            .chain(self.current_stack.first().map(|&(sign, actual)| (sign, actual)))
+        {
+            self.buf.push(AsmValue::Stack(signature_pos as i16));
+            self.buf.stack_sub(skipped_args as usize * ptr_size);
+        }
+        self.buf.call(AsmValue::Constant(addr as u32));
+        if !stdcall {
+            let stack_size = ptr_size *
+                self.current_stack.last().map(|&(_, x)| x as usize + 1).unwrap_or(0);
+            self.buf.stack_add(stack_size);
+        }
+        for reg in self.preserved_regs.iter().rev() {
+            self.buf.pop(AsmValue::Register(*reg));
+        }
+        self.buf.ret(0);
+    }
+
+    pub fn write(&mut self, patch: &mut ModulePatch) -> *const u8 {
+        self.buf.write(&mut patch.exec_heap, 0, |_| { })
+    }
+
+    pub fn next_offset(&mut self) -> usize {
+        self.offset_pos += 1;
+        self.func_offsets[self.offset_pos - 1]
+    }
+}
+
 pub struct AssemblerBuf {
     buf: Vec<u8>,
     fixups: SmallVec<[usize; 8]>,
@@ -198,6 +292,10 @@ impl AssemblerBuf {
             fixups: SmallVec::new(),
             stack_offset: 0,
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.buf.len()
     }
 
     pub fn reset_stack_offset(&mut self) {
@@ -227,6 +325,7 @@ impl AssemblerBuf {
         self.buf.set_len(new_len);
     }
 
+    // TODO: ´write_target´ is only relevant for hooks :l
     pub fn write<Cb: FnOnce(*mut u8)>(&mut self,
                                       heap: &mut ExecutableHeap,
                                       extra_len: usize,
@@ -261,7 +360,7 @@ impl AssemblerBuf {
                 self.buf.write_u8(0x50 + reg).unwrap();
             }
             AsmValue::Stack(pos) => {
-                let offset = (pos as i32 + self.stack_offset + 1) * 4;
+                let offset = (pos * 4) as i32 + self.stack_offset + 4;
                 match offset {
                     0 => {
                         self.buf.write(&[0xff, 0x34, 0xe4]).unwrap();
@@ -276,17 +375,27 @@ impl AssemblerBuf {
                 }
             }
         }
-        self.stack_offset += 1;
+        self.stack_offset += 4;
+    }
+
+    pub fn pop(&mut self, val: AsmValue) {
+        match val {
+            AsmValue::Register(reg) => {
+                self.buf.write_u8(0x58 + reg).unwrap();
+            }
+            _ => unimplemented!(),
+        }
+        self.stack_offset += 4;
     }
 
     pub fn pushad(&mut self) {
         self.buf.write_u8(0x60).unwrap();
-        self.stack_offset += 8;
+        self.stack_offset += 8 * 4;
     }
 
     pub fn popad(&mut self) {
         self.buf.write_u8(0x61).unwrap();
-        self.stack_offset -= 8;
+        self.stack_offset -= 8 * 4;
     }
 
     pub fn mov(&mut self, to: AsmValue, from: AsmValue) {
@@ -298,7 +407,7 @@ impl AssemblerBuf {
                 }
             }
             (AsmValue::Register(to), AsmValue::Stack(from)) => {
-                let offset = (from as i32 + self.stack_offset + 1) * 4;
+                let offset = (from * 4) as i32 + self.stack_offset + 4;
                 match offset {
                     0 => {
                         self.buf.write(&[0x8b, 0x4 + to * 8, 0xe4]).unwrap();
@@ -327,6 +436,7 @@ impl AssemblerBuf {
                 self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
             }
         }
+        self.stack_offset -= value as i32;
     }
 
     pub fn stack_sub(&mut self, value: usize) {
@@ -340,6 +450,7 @@ impl AssemblerBuf {
                 self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
             }
         }
+        self.stack_offset += value as i32;
     }
 
     pub fn ret(&mut self, stack_pop: usize) {

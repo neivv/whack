@@ -1,9 +1,11 @@
-use std::io::Write;
+use std::mem;
 use std::ptr;
+use std::io::Write;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use smallvec::SmallVec;
 
+use ModulePatch;
 pub use win_common::*;
 
 #[inline]
@@ -14,12 +16,31 @@ pub unsafe fn write_jump(from: *mut u8, to: *const u8) {
     *(from.offset(6) as *mut usize) = to as usize;
 }
 
+fn is_preserved_reg(reg: u8) -> bool {
+    match reg {
+        0 | 1 | 2 | 8 | 9 | 10 | 11 => false,
+        _ => true,
+    }
+}
+
 pub struct WrapAssembler {
     orig: *mut u8,
     fnptr_hook: bool,
     stdcall: bool,
     preserve_regs: bool,
     args: SmallVec<[Location; 8]>,
+}
+
+pub struct FuncAssembler {
+    buf: AssemblerBuf,
+    // (signature_pos, stack_pos)
+    // e.g. fn(@stack(2) i32, @eax i32, @ecx i32, @stack(1) i32)
+    // would have (0, 2), (3, 1).
+    current_stack: SmallVec<[(u8, u8); 8]>,
+    preserved_regs: SmallVec<[(u8); 8]>,
+    arg_num: u8,
+    func_offsets: Vec<usize>,
+    offset_pos: usize,
 }
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
@@ -57,6 +78,18 @@ impl AsmValue {
         match *loc {
             Location::Register(x) => AsmValue::Register(x),
             Location::Stack(x) => AsmValue::Stack(x),
+        }
+    }
+
+    /// Gives corresponding `AsmValue` for a function's argument `arg_num`,
+    /// when the caller is using the standard Microsoft's calling convention.
+    fn for_callee(arg_num: u8) -> AsmValue {
+        match arg_num {
+            0 => AsmValue::Register(1),
+            1 => AsmValue::Register(2),
+            2 => AsmValue::Register(8),
+            3 => AsmValue::Register(9),
+            n => AsmValue::Stack(n as i16),
         }
     }
 }
@@ -211,6 +244,88 @@ impl WrapAssembler {
     }
 }
 
+// Currently really similar impl as in x86.rs
+impl FuncAssembler {
+    pub fn new() -> FuncAssembler {
+        FuncAssembler {
+            buf: AssemblerBuf::new(),
+            current_stack: SmallVec::new(),
+            preserved_regs: SmallVec::new(),
+            arg_num: 0,
+            func_offsets: Vec::with_capacity(64),
+            offset_pos: 0,
+        }
+    }
+
+    // Pushes are written at once in `finish_fnwrap`.
+    pub fn stack(&mut self, pos: i32) {
+        self.current_stack.push((self.arg_num, pos as u8));
+        self.arg_num += 1;
+    }
+
+    pub fn register(&mut self, reg: u8) {
+        if is_preserved_reg(reg) {
+            self.buf.push(AsmValue::Register(reg));
+            self.preserved_regs.push(reg);
+        }
+        self.buf.mov(AsmValue::Register(reg), AsmValue::for_callee(self.arg_num));
+        self.arg_num += 1;
+    }
+
+    pub fn new_fnwrap(&mut self) {
+        self.buf.reset_stack_offset();
+        self.func_offsets.push(self.buf.len());
+        self.current_stack.clear();
+        self.preserved_regs.clear();
+        self.arg_num = 0;
+    }
+
+    pub fn finish_fnwrap(&mut self, addr: usize, stdcall: bool) {
+        let ptr_size = mem::size_of::<usize>();
+        self.current_stack.sort_by_key(|&(_, x)| x);
+        // Align the stack if necessary
+        let stack_args_size = ptr_size *
+            self.current_stack.last().map(|&(_, x)| x as usize + 1).unwrap_or(0);
+        let needs_align = (stack_args_size + self.preserved_regs.len()) & 1 == 0;
+        let align_size = if needs_align { 8 } else { 0 };
+        self.buf.stack_sub(align_size);
+
+        for (signature_pos, skipped_args) in
+            self.current_stack.windows(2).rev()
+            .map(|window| (window[0], window[1]))
+            // `skipped_args` is the count of unused stack arg positions in between these
+            // two which are used.
+            .map(|((_, next_pos), (sign_pos, pos))| (sign_pos, pos - next_pos - 1))
+            // Special case for the first stack pos.
+            .chain(self.current_stack.first().map(|&(sign, actual)| (sign, actual)))
+        {
+            self.buf.push(AsmValue::for_callee(signature_pos));
+            self.buf.stack_sub(skipped_args as usize * ptr_size);
+        }
+        self.buf.call(AsmValue::Constant(addr as u64));
+
+        // Pop the frame for stack args (if not stdcall) and the possible alignment filler
+        match stdcall {
+            true => self.buf.stack_add(align_size),
+            false => self.buf.stack_add(stack_args_size + align_size),
+        }
+        for reg in self.preserved_regs.iter().rev() {
+            self.buf.pop(AsmValue::Register(*reg));
+        }
+        self.buf.ret(0);
+        self.buf.write_fixups();
+    }
+
+    pub fn write(&mut self, patch: &mut ModulePatch) -> *const u8 {
+        self.buf.write(&mut patch.exec_heap, 0, |_| { })
+    }
+
+    pub fn next_offset(&mut self) -> usize {
+        self.offset_pos += 1;
+        self.func_offsets[self.offset_pos - 1]
+    }
+}
+
 pub struct AssemblerBuf {
     buf: Vec<u8>,
     // Pos in buf, value
@@ -229,6 +344,10 @@ impl AssemblerBuf {
             constants: SmallVec::new(),
             stack_offset: 0,
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.buf.len()
     }
 
     pub fn reset_stack_offset(&mut self) {
@@ -305,7 +424,7 @@ impl AssemblerBuf {
                 self.buf.write_u8(0x50 + (reg & 7)).unwrap();
             }
             AsmValue::Stack(pos) => {
-                let offset = (pos as i32 + self.stack_offset + 1) * 8;
+                let offset = (pos * 8) as i32 + self.stack_offset + 8;
                 match offset {
                     0 => {
                         self.buf.write(&[0xff, 0x34, 0xe4]).unwrap();
@@ -320,7 +439,20 @@ impl AssemblerBuf {
                 }
             }
         }
-        self.stack_offset += 1;
+        self.stack_offset += 8;
+    }
+
+    pub fn pop(&mut self, val: AsmValue) {
+        match val {
+            AsmValue::Register(reg) => {
+                if reg >= 8 {
+                    self.buf.write_u8(0x41).unwrap();
+                }
+                self.buf.write_u8(0x58 + (reg & 7)).unwrap();
+            }
+            _ => unimplemented!(),
+        }
+        self.stack_offset -= 8;
     }
 
     pub fn pushad(&mut self) {
@@ -334,6 +466,7 @@ impl AssemblerBuf {
         for x in 0x50..0x58 {
             self.buf.write(&[0x41, x]).unwrap();
         }
+        self.stack_offset += 15 * 8;
     }
 
     pub fn popad(&mut self) {
@@ -347,6 +480,7 @@ impl AssemblerBuf {
         for x in (0x58..0x5d).rev() {
             self.buf.write_u8(x).unwrap();
         }
+        self.stack_offset -= 15 * 8;
     }
 
     pub fn mov(&mut self, to: AsmValue, from: AsmValue) {
@@ -363,7 +497,7 @@ impl AssemblerBuf {
             (AsmValue::Register(to), AsmValue::Stack(from)) => {
                 let reg_spec_byte = 0x48 + if to >= 8 { 4 } else { 0 };
                 self.buf.write_u8(reg_spec_byte).unwrap();
-                let offset = (from as i32 + self.stack_offset + 1) * 8;
+                let offset = (from * 8) as i32 + self.stack_offset + 8;
                 match offset {
                     0 => {
                         self.buf.write(&[0x8b, 0x4 + (to & 7) * 8, 0xe4]).unwrap();
@@ -400,6 +534,7 @@ impl AssemblerBuf {
                 self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
             }
         }
+        self.stack_offset -= value as i32;
     }
 
     pub fn stack_sub(&mut self, value: usize) {
@@ -413,6 +548,7 @@ impl AssemblerBuf {
                 self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
             }
         }
+        self.stack_offset += value as i32;
     }
 
     pub fn ret(&mut self, stack_pop: usize) {

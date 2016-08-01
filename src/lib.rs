@@ -402,6 +402,10 @@ impl<'a> ModulePatch<'a> {
             all_modules_id: all_modules_id
         }
     }
+
+    pub fn base(&self) -> usize {
+        self.base
+    }
 }
 
 /// An exported function, identified either by its name or ordinal.
@@ -533,5 +537,18 @@ impl<T> ops::Deref for Variable<T> {
 impl<T> ops::DerefMut for Variable<T> {
     fn deref_mut<'a>(&'a mut self) -> &'a mut T {
         unsafe { mem::transmute(self.address) }
+    }
+}
+
+#[doc(hidden)]
+/// A type which wraps a memory address and `Deref`s to `fn(...) -> ...`.
+/// `Func` is meant to be created by the `whack_funcs!` macro, and to be used as it were
+/// a static mutable function pointer.
+pub struct Func<FnPtr>(pub usize, pub PhantomData<FnPtr>);
+
+impl<FnPtr> ops::Deref for Func<FnPtr> {
+    type Target = FnPtr;
+    fn deref(&self) -> &FnPtr {
+        unsafe { mem::transmute(&self.0) }
     }
 }
