@@ -40,22 +40,22 @@ pub trait ExportHook {
 #[macro_export]
 macro_rules! export_hook {
     (pub extern "system" ($ord:expr) $name:ident($($aty:tt)*) -> $ret:ty) => {
-        impl_hook!(yes ~ system, $ord, $name, $ret, [$([$aty])*]);
+        whack_name_args!([imp, yes, system, $ord, $name, $ret], [$([$aty])*]);
     };
     (extern "system" ($ord:expr) $name:ident($($aty:tt)*) -> $ret:ty) => {
-        impl_hook!(no ~ system, $ord, $name, $ret, [$([$aty])*]);
+        whack_name_args!([imp, no, system, $ord, $name, $ret], [$([$aty])*]);
     };
     (pub extern "system" $name:ident($($aty:tt)*)) => {
-        impl_hook!(yes ~ system, -1i32, $name, (), [$([$aty])*]);
+        whack_name_args!([imp, yes, system, (-1i32), $name, ()], [$([$aty])*]);
     };
     (pub extern "system" $name:ident($($aty:tt)*) -> $ret:ty) => {
-        impl_hook!(yes ~ system, -1i32, $name, $ret, [$([$aty])*]);
+        whack_name_args!([imp, yes, system, (-1i32), $name, $ret], [$([$aty])*]);
     };
     (extern "system" $name:ident($($aty:tt)*)) => {
-        impl_hook!(no ~ system, -1i32, $name, (), [$([$aty])*]);
+        whack_name_args!([imp, no, system, (-1i32), $name, ()], [$([$aty])*]);
     };
     (extern "system" $name:ident($($aty:tt)*) -> $ret:ty) => {
-        impl_hook!(no ~ system, -1i32, $name, $ret, [$([$aty])*]);
+        whack_name_args!([imp, no, system, (-1i32), $name, $ret], [$([$aty])*]);
     };
 }
 
@@ -72,16 +72,16 @@ macro_rules! declare_hooks {
 #[macro_export]
 macro_rules! address_hook {
     ($abi:ident, $base:expr, $addr:expr, pub $name:ident($($aty:tt)*)) => {
-        do_addr_hook!(yes ~ $abi, $base, $addr, $name, (), [$([$aty])*]);
+        whack_name_args!([addr, yes, $abi, $base, $addr, $name, ()], [$([$aty])*]);
     };
     ($abi:ident, $base:expr, $addr:expr, pub $name:ident($($aty:tt)*) -> $ret:ty) => {
-        do_addr_hook!(yes ~ $abi, $base, $addr, $name, $ret, [$([$aty])*]);
+        whack_name_args!([addr, yes, $abi, $base, $addr, $name, $ret], [$([$aty])*]);
     };
     ($abi:ident, $base:expr, $addr:expr, $name:ident($($aty:tt)*)) => {
-        do_addr_hook!(no ~ $abi, $base, $addr, $name, (), [$([$aty])*]);
+        whack_name_args!([addr, no, $abi, $base, $addr, $name, ()], [$([$aty])*]);
     };
     ($abi:ident, $base:expr, $addr:expr, $name:ident($($aty:tt)*) -> $ret:ty) => {
-        do_addr_hook!(no ~ $abi, $base, $addr, $name, $ret, [$([$aty])*]);
+        whack_name_args!([addr, no, $abi, $base, $addr, $name, $ret], [$([$aty])*]);
     };
 }
 
@@ -180,7 +180,7 @@ macro_rules! yes_no {
 /// (Sensical? As on x86, the default list is just [stack, stack, ...])
 #[macro_export]
 #[doc(hidden)]
-macro_rules! name_args {
+macro_rules! whack_name_args_recurse {
     // @ stack
     (nope, $imp_stack_pos:expr, [$($other:tt),*],
         [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
@@ -188,17 +188,17 @@ macro_rules! name_args {
         [$next_id:ident, $($rest_id:ident),*],
         [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
-        name_args!(yup, $imp_stack_pos, [$($other),*],
-                  [$([$oki @ $imploc($impp): $okt])* [$next_id @ stack($pos): $next_ty]],
-                  [$($rest_args)*], [$($rest_id),*]);
+        whack_name_args_recurse!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $imploc($impp): $okt])* [$next_id @ stack($pos): $next_ty]],
+            [$($rest_args)*], [$($rest_id),*]);
     };
     (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
         [@ stack($pos:expr) $next_ty:ty, $($rest_args:tt)+],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
-        name_args!(yup, $imp_stack_pos, [$($other),*],
-                  [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($pos): $next_ty]],
-                  [$($rest_args)*], [$($rest_id),*]);
+        whack_name_args_recurse!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($pos): $next_ty]],
+            [$($rest_args)*], [$($rest_id),*]);
     };
     // Last arg @ stack
     (nope, $imp_stack_pos:expr, [$($other:tt),*],
@@ -207,17 +207,17 @@ macro_rules! name_args {
         [$next_id:ident, $($rest_id:ident),*],
         [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
-        name_args!(yup, $imp_stack_pos, [$($other),*],
-                  [$([$oki @ $imploc($impp): $okt])* [$next_id @ stack($pos): $next_ty]],
-                  [], [$($rest_id),*]);
+        whack_name_args_recurse!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $imploc($impp): $okt])* [$next_id @ stack($pos): $next_ty]],
+            [], [$($rest_id),*]);
     };
     (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
         [@ stack($pos:expr) $next_ty:ty],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
-        name_args!(yup, $imp_stack_pos, [$($other),*],
-                  [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($pos): $next_ty]],
-                  [], [$($rest_id),*]);
+        whack_name_args_recurse!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($pos): $next_ty]],
+            [], [$($rest_id),*]);
     };
     // With @location
     (nope, $imp_stack_pos:expr, [$($other:tt),*],
@@ -226,17 +226,17 @@ macro_rules! name_args {
         [$next_id:ident, $($rest_id:ident),*],
         [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
-        name_args!(yup, $imp_stack_pos, [$($other),*],
-                  [$([$oki @ $imploc($impp): $okt])* [$next_id @ $loc(0): $next_ty]],
-                  [$($rest_args)*], [$($rest_id),*]);
+        whack_name_args_recurse!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $imploc($impp): $okt])* [$next_id @ $loc(0): $next_ty]],
+            [$($rest_args)*], [$($rest_id),*]);
     };
     (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
         [@ $loc:ident $next_ty:ty, $($rest_args:tt)+],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
-        name_args!(yup, $imp_stack_pos, [$($other),*],
-                  [$([$oki @ $okl($okp): $okt])* [$next_id @ $loc(0): $next_ty]],
-                  [$($rest_args)*], [$($rest_id),*]);
+        whack_name_args_recurse!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $okl($okp): $okt])* [$next_id @ $loc(0): $next_ty]],
+            [$($rest_args)*], [$($rest_id),*]);
     };
     // Last arg @location
     (nope, $imp_stack_pos:expr, [$($other:tt),*],
@@ -245,17 +245,17 @@ macro_rules! name_args {
         [$next_id:ident, $($rest_id:ident),*],
         [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
-        name_args!(yup, $imp_stack_pos, [$($other),*],
-                  [$([$oki @ $imploc($impp): $okt])* [$next_id @ $loc(0): $next_ty]],
-                  [], [$($rest_id),*]);
+        whack_name_args_recurse!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $imploc($impp): $okt])* [$next_id @ $loc(0): $next_ty]],
+            [], [$($rest_id),*]);
     };
     (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
         [@ $loc:ident $next_ty:ty],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
-        name_args!(yup, $imp_stack_pos, [$($other),*],
-                  [$([$oki @ $okl($okp): $okt])* [$next_id @ $loc(0): $next_ty]],
-                  [], [$($rest_id),*]);
+        whack_name_args_recurse!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $okl($okp): $okt])* [$next_id @ $loc(0): $next_ty]],
+            [], [$($rest_id),*]);
     };
     // Without @location
     (nope, $imp_stack_pos:expr, [$($other:tt),*],
@@ -264,18 +264,18 @@ macro_rules! name_args {
         [$next_id:ident, $($rest_id:ident),*],
         [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
-        name_args!(nope, $imp_stack_pos + 1, [$($other),*],
-                  [$([$oki @ $okl($okp) / $imploc($impp): $okt])*
-                      [$next_id @ $next_loc($nextp) / stack($imp_stack_pos): $next_ty]],
-                  [$($rest_args)*], [$($rest_id),*], [$($rest_loc($rest_pos)),*]);
+        whack_name_args_recurse!(nope, $imp_stack_pos + 1, [$($other),*],
+            [$([$oki @ $okl($okp) / $imploc($impp): $okt])*
+                [$next_id @ $next_loc($nextp) / stack($imp_stack_pos): $next_ty]],
+            [$($rest_args)*], [$($rest_id),*], [$($rest_loc($rest_pos)),*]);
     };
     (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
         [$next_ty:ty, $($rest_args:tt)+],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
-        name_args!(yup, $imp_stack_pos + 1, [$($other),*],
-                  [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($imp_stack_pos): $next_ty]],
-                  [$($rest_args)*], [$($rest_id),*]);
+        whack_name_args_recurse!(yup, $imp_stack_pos + 1, [$($other),*],
+            [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($imp_stack_pos): $next_ty]],
+            [$($rest_args)*], [$($rest_id),*]);
     };
     // Last arg without @location
     (nope, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
@@ -283,19 +283,19 @@ macro_rules! name_args {
         [$next_id:ident, $($rest_id:ident),*],
         [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
-        name_args!(nope, $imp_stack_pos + 1,
-                   [$($other),*],
-                   [$([$oki @ $okl($okp) / $imploc($impp): $okt])*
-                       [$next_id @ $next_loc($nextp) / stack($imp_stack_pos): $next_ty]],
-                   [], [$($rest_id),*], [$($rest_loc($rest_pos)),*]);
+        whack_name_args_recurse!(nope, $imp_stack_pos + 1,
+            [$($other),*],
+            [$([$oki @ $okl($okp) / $imploc($impp): $okt])*
+                [$next_id @ $next_loc($nextp) / stack($imp_stack_pos): $next_ty]],
+            [], [$($rest_id),*], [$($rest_loc($rest_pos)),*]);
     };
     (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
         [$next_ty:ty],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
-        name_args!(yup, $imp_stack_pos + 1, [$($other),*],
-                  [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($imp_stack_pos): $next_ty]],
-                  [], [$($rest_id),*]);
+        whack_name_args_recurse!(yup, $imp_stack_pos + 1, [$($other),*],
+            [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($imp_stack_pos): $next_ty]],
+            [], [$($rest_id),*]);
     };
     // Finish
     (nope, $imp_stack_pos:expr, [addr, $($other:tt),*],
