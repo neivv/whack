@@ -151,6 +151,20 @@ macro_rules! impl_export_hook {
 }
 
 #[macro_export]
+macro_rules! whack_vars {
+    ($init_fn:ident, $base:expr, $($addr:expr => $name:ident: $ty:ty;)*) => {
+        $(pub static mut $name: $crate::Variable<$ty> = $crate::Variable {
+            address: 0,
+            phantom: ::std::marker::PhantomData,
+        };)*
+        pub unsafe fn $init_fn(patch: &mut $crate::ModulePatch) {
+            let diff = patch.base() - $base;
+            $($name.address = $addr + diff;)*
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! whack_funcs {
     (stdcall, $init_fn:ident, $base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
         $(whack_fn!(pub $name($($args)*) $(-> $ret)*);)*
@@ -197,7 +211,7 @@ macro_rules! whack_fnwrap_finish {
 #[doc(hidden)]
 macro_rules! whack_fn {
     (pub $name:ident($($args:tt)*)) => {
-        whack_fn!($abi, pub $name($($args)*) -> ());
+        whack_fn!(pub $name($($args)*) -> ());
     };
     (pub $name:ident($($args:tt)*) -> $ret:ty) => {
         whack_name_args!([fndecl, $name, $ret], [$([$args])*]);
