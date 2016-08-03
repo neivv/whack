@@ -474,10 +474,9 @@ impl AssemblerBuf {
     pub fn jump(&mut self, target: AsmValue) {
         match target {
             AsmValue::Constant(dest) => {
-                self.buf.write_u8(0xe9).unwrap();
-                let current_pos = self.buf.as_ptr() as u32 + self.buf.len() as u32;
-                let value = dest.wrapping_sub((current_pos).wrapping_add(4));
-                self.buf.write_u32::<LittleEndian>(value).unwrap();
+                self.buf.write(&[0xc7, 0x44, 0xe4, 0xfc]).unwrap();
+                self.buf.write_u32::<LittleEndian>(dest).unwrap();
+                self.buf.write(&[0xff, 0x64, 0xe4, 0xfc]).unwrap();
             }
             AsmValue::Register(dest) => {
                 self.buf.write(&[0xff, 0xe0 + dest]).unwrap();
@@ -489,10 +488,9 @@ impl AssemblerBuf {
     pub fn call(&mut self, target: AsmValue) {
         match target {
             AsmValue::Constant(dest) => {
-                self.buf.write_u8(0xe8).unwrap();
-                let current_pos = self.buf.as_ptr() as u32 + self.buf.len() as u32;
-                let value = dest.wrapping_sub((current_pos).wrapping_add(4));
-                self.buf.write_u32::<LittleEndian>(value).unwrap();
+                self.buf.write(&[0xc7, 0x44, 0xe4, 0xfc]).unwrap();
+                self.buf.write_u32::<LittleEndian>(dest).unwrap();
+                self.buf.write(&[0xff, 0x54, 0xe4, 0xfc]).unwrap();
             }
             AsmValue::Register(dest) => {
                 self.buf.write(&[0xff, 0xd0 + dest]).unwrap();
