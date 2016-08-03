@@ -156,10 +156,10 @@ macro_rules! whack_funcs {
         $(whack_fn!(pub $name($($args)*) $(-> $ret)*);)*
         pub unsafe fn $init_fn(patch: &mut $crate::ModulePatch) {
             let diff = patch.base() - $base;
-            let buf = $crate::platform::FuncAssembler::new();
+            let mut buf = $crate::platform::FuncAssembler::new();
             $(whack_fnwrap_write!(true, $addr as usize, buf, diff, [$($args)*]);)*
-            buf.write(patch);
-            $(whack_fnwrap_finish!($name, buf);)*
+            let funcs = buf.write(patch) as usize;
+            $(whack_fnwrap_finish!($name, buf, funcs);)*
         }
     };
     ($init_fn:ident, $base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
