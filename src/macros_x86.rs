@@ -104,11 +104,12 @@ macro_rules! hook_wrapper_impl {
         #[allow(unused_mut)]
         unsafe fn write_wrapper(preserve_regs: bool,
                                 target: T,
-                                orig_addr: Option<*mut u8>,
-                                exec_heap: &mut $crate::platform::ExecutableHeap) -> *const u8 {
+                                orig_addr: Option<*const u8>,
+                                exec_heap: &mut $crate::platform::ExecutableHeap
+                                ) -> (*const u8, usize) {
             let fnptr_hook = yes_no!($fnptr_hook);
             let in_wrap_addr = $name::in_wrap as *const u8;
-            let orig = orig_addr.unwrap_or(::std::ptr::null_mut());
+            let orig = orig_addr.unwrap_or(::std::ptr::null());
             let mut wrapper = $crate::platform::WrapAssembler::new(orig,
                                                                    fnptr_hook,
                                                                    $stdcall,
@@ -116,8 +117,9 @@ macro_rules! hook_wrapper_impl {
             hook_initialize_wrapper!(wrapper, [$($aloc, $apos),*]);
             let target_size = ::std::mem::size_of::<T>() +
                 ::std::mem::size_of::<*const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret>();
-            let in_wrapper = wrapper.write(exec_heap, in_wrap_addr, target_size, |out| {
-                let fat_ptr_size = ::std::mem::size_of::<*const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret>();
+            let result = wrapper.write(exec_heap, in_wrap_addr, target_size, |out| {
+                let fat_ptr_size =
+                    ::std::mem::size_of::<*const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret>();
                 let target_mem = out.offset(fat_ptr_size as isize) as *mut T;
                 ::std::ptr::copy_nonoverlapping(&target, target_mem, 1);
                 ::std::mem::forget(target);
@@ -126,10 +128,7 @@ macro_rules! hook_wrapper_impl {
                 ::std::ptr::copy_nonoverlapping(&target_ptr, ptr_pos, 1);
                 ::std::mem::forget(target_ptr);
             });
-            if let Some(_orig_addr) = orig_addr {
-                write_hooking_jump!($fnptr_hook, _orig_addr, in_wrapper);
-            }
-            in_wrapper
+            result
         }
     }
 }
@@ -148,15 +147,6 @@ macro_rules! hook_initialize_wrapper {
     }};
     ($wrapper:expr, []) => {
     }
-}
-
-#[macro_export]
-#[doc(hidden)]
-macro_rules! write_hooking_jump {
-    (yes, $src:expr, $dest:expr) => {};
-    (no, $src:expr, $dest:expr) => {
-        $crate::platform::write_jump($src, $dest)
-    };
 }
 
 #[macro_export]

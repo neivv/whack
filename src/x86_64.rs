@@ -12,7 +12,7 @@ pub use win_common::*;
 pub unsafe fn write_jump(from: *mut u8, to: *const u8) {
     *from = 0xff;
     *from.offset(1) = 0x25;
-    *(from.offset(2) as *mut usize) = 0;
+    *(from.offset(2) as *mut u32) = 0;
     *(from.offset(6) as *mut usize) = to as usize;
 }
 
@@ -24,7 +24,7 @@ fn is_preserved_reg(reg: u8) -> bool {
 }
 
 pub struct WrapAssembler {
-    orig: *mut u8,
+    orig: *const u8,
     fnptr_hook: bool,
     stdcall: bool,
     preserve_regs: bool,
@@ -95,7 +95,7 @@ impl AsmValue {
 }
 
 impl WrapAssembler {
-    pub fn new(orig_addr: *mut u8, fnptr_hook: bool, stdcall: bool, preserve_regs: bool) -> WrapAssembler {
+    pub fn new(orig_addr: *const u8, fnptr_hook: bool, stdcall: bool, preserve_regs: bool) -> WrapAssembler {
         WrapAssembler {
             orig: orig_addr,
             fnptr_hook: fnptr_hook,
@@ -236,11 +236,23 @@ impl WrapAssembler {
                      rust_in_wrapper: *const u8,
                      target_len: usize,
                      write_callback: Cb,
-                    ) -> *const u8
+                    ) -> (*const u8, usize)
     where Cb: FnOnce(*mut u8),
     {
+        let orig  = self.orig;
+        let orig_ins_len = if !self.fnptr_hook && orig != ptr::null() {
+            unsafe { ins_len(orig, 14) }
+        } else {
+            0
+        };
         let mut buffer = self.write_common(rust_in_wrapper);
-        buffer.write(heap, target_len, write_callback)
+        let data = heap.allocate(buffer.len() + target_len + orig_ins_len);
+        if orig_ins_len != 0 {
+            unsafe { ptr::copy_nonoverlapping(orig, data, orig_ins_len) };
+        }
+        let wrapper = unsafe { data.offset(orig_ins_len as isize) };
+        buffer.write(wrapper, write_callback);
+        (wrapper, orig_ins_len)
     }
 }
 
@@ -317,7 +329,9 @@ impl FuncAssembler {
     }
 
     pub fn write(&mut self, patch: &mut ModulePatch) -> *const u8 {
-        self.buf.write(&mut patch.exec_heap, 0, |_| { })
+        let data = patch.exec_heap.allocate(self.buf.len());
+        self.buf.write(data, |_| { });
+        data
     }
 
     pub fn next_offset(&mut self) -> usize {
@@ -384,13 +398,7 @@ impl AssemblerBuf {
         self.align(16);
     }
 
-    pub fn write<Cb: FnOnce(*mut u8)>(&mut self,
-                                      heap: &mut ExecutableHeap,
-                                      extra_len: usize,
-                                      write_target: Cb
-                                     ) -> *const u8
-    {
-        let data = heap.allocate(self.buf.len() + extra_len);
+    pub fn write<Cb: FnOnce(*mut u8)>(&mut self, data: *mut u8, write_target: Cb) {
         let diff = (data as usize).wrapping_sub(self.buf.as_ptr() as usize);
         for &(fixup, value) in self.fixups.iter() {
             let value_pos = fixup + 4 +
@@ -402,7 +410,6 @@ impl AssemblerBuf {
             ptr::copy_nonoverlapping(self.buf.as_ptr(), data, self.buf.len());
             write_target(data.offset(self.buf.len() as isize));
         }
-        data
     }
 
     pub fn push(&mut self, val: AsmValue) {

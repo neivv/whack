@@ -2,9 +2,9 @@ pub trait AddressHookClosure<Callback> {
     fn address(base: usize) -> usize;
     unsafe fn write_wrapper(preserve_regs: bool,
                             target: Callback,
-                            orig_addr: Option<*mut u8>,
+                            orig_addr: Option<*const u8>,
                             exec_heap: &mut ::platform::ExecutableHeap
-                           ) -> *const u8;
+                           ) -> (*const u8, usize);
 }
 
 pub trait AddressHook {
@@ -23,9 +23,9 @@ pub trait ExportHookClosure<Callback> {
     fn default_export() -> ::Export<'static>;
     unsafe fn write_wrapper(preserve_regs: bool,
                             target: Callback,
-                            orig_addr: Option<*mut u8>,
+                            orig_addr: Option<*const u8>,
                             exec_heap: &mut ::platform::ExecutableHeap
-                           ) -> *const u8;
+                           ) -> (*const u8, usize);
 }
 
 pub trait ExportHook {
@@ -118,7 +118,8 @@ macro_rules! impl_address_hook {
                 let target = move |$($an,)* _: &Fn($($aty),*) -> $ret| {
                     val($($an),*)
                 };
-                $crate::platform::jump_hook::<Self, _>(None, target, exec_heap, false) as *const u8
+                $crate::platform::hook_wrapper::<Self, _>(None, target, exec_heap, false).0
+                    as *const u8
             }
         }
     }

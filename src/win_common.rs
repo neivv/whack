@@ -15,8 +15,43 @@ use rust_win32error::Win32Error;
 use winapi::{self, HANDLE, HMODULE};
 
 use {AddressHookClosure, AnyModulePatch, Patcher, Export, ExportHookClosure};
-use patch_type::*;
 use pe;
+
+pub enum PatchType {
+    // Import addr (relative from base), original, hook
+    Import(usize, usize, usize),
+    // Addr (relative from base), wrapper, orig_size
+    // The orig code is stored at `wrapper - orig_size`.
+    BasicHook(usize, usize, usize),
+}
+
+impl PatchType {
+    pub unsafe fn enable(&self, base: usize) {
+        match *self {
+            PatchType::Import(offset, _, val) => {
+                let addr = (base + offset) as *mut usize;
+                *addr = val;
+            }
+            PatchType::BasicHook(offset, wrapper, _) => {
+                let addr = (base + offset) as *mut u8;
+                ::platform::write_jump(addr, wrapper as *const u8);
+            }
+        }
+    }
+
+    pub unsafe fn disable(&self, base: usize) {
+        match *self {
+            PatchType::Import(offset, val, _) => {
+                let addr = (base + offset) as *mut usize;
+                *addr = val;
+            }
+            PatchType::BasicHook(offset, wrapper, size) => {
+                let addr = (base + offset) as *mut u8;
+                ptr::copy_nonoverlapping((wrapper - size) as *const u8, addr, size);
+            }
+        }
+    }
+}
 
 pub type LibraryHandle = HMODULE;
 
@@ -151,13 +186,27 @@ pub unsafe fn redirect_stderr(filename: &Path) -> bool {
     }
 }
 
-pub unsafe fn jump_hook<H: AddressHookClosure<T>, T>(func: Option<*mut u8>,
+// Separate for `custom_calling_convention`.
+pub unsafe fn hook_wrapper<H: AddressHookClosure<T>, T>(func: Option<*const u8>,
+                                                        target: T,
+                                                        exec_heap: &mut ExecutableHeap,
+                                                        preserve_regs: bool,
+                                                       ) -> (usize, usize)
+{
+    let result = H::write_wrapper(preserve_regs, target, func, exec_heap);
+    (result.0 as usize, result.1)
+}
+
+pub unsafe fn jump_hook<H: AddressHookClosure<T>, T>(base: usize,
                                                      target: T,
                                                      exec_heap: &mut ExecutableHeap,
                                                      preserve_regs: bool,
-                                                    ) -> usize
+                                                    ) -> PatchType
 {
-    H::write_wrapper(preserve_regs, target, func, exec_heap) as usize
+    let func = H::address(base);
+    let (wrapper, orig_ins_len) =
+        hook_wrapper::<H, T>(Some(func as *const u8), target, exec_heap, preserve_regs);
+    PatchType::BasicHook(func - base, wrapper, orig_ins_len)
 }
 
 pub unsafe fn import_hook<H: ExportHookClosure<T>, T>(base_addr: usize,
@@ -184,8 +233,7 @@ pub unsafe fn import_hook<H: ExportHookClosure<T>, T>(base_addr: usize,
 
     pe::import_ptr(base_addr, &func_dll_with_extension, func).map(|ptr| {
         let orig = *ptr;
-        let wrapper_memory = H::write_wrapper(false, target, Some(orig as *mut u8), exec_heap);
-        *ptr = wrapper_memory as usize;
+        let wrapper_memory = H::write_wrapper(false, target, Some(orig as *mut u8), exec_heap).0;
         PatchType::Import(ptr as usize - base_addr, orig, wrapper_memory as usize)
     })
 }

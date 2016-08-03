@@ -33,16 +33,6 @@ pub mod platform;
 #[doc(hidden)]
 pub mod platform;
 
-mod patch_type {
-    // Don't want to export this, but still share it between modules
-    pub enum PatchType {
-        // Import addr (relative from base), original, hook
-        Import(usize, usize, usize),
-        // Addr (relative from base), wrapper
-        BasicHook(usize, usize),
-    }
-}
-
 pub use macros::{AddressHook, AddressHookClosure, ExportHook, ExportHookClosure};
 
 use std::{ops, mem};
@@ -51,10 +41,8 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::{Arc, MutexGuard, Mutex, Weak};
 
-use patch_type::*;
-
 struct PatchHistory {
-    ty: PatchType,
+    ty: platform::PatchType,
     // Used if the patch was applied by `patch_modules`,
     // so that all patches caused by one call can be removed.
     // 0 otherwise.
@@ -100,6 +88,7 @@ pub struct ActivePatcher<'a> {
 struct PatcherState {
     // The string is module's name (TODO: It should be normalized).
     patches: Vec<(Option<OsString>, Vec<Arc<PatchHistory>>)>,
+    disabled_patches: Vec<(Option<OsString>, Vec<Arc<PatchHistory>>)>,
     exec_heap: platform::ExecutableHeap,
     library_load_hooks: Vec<Arc<PatchHistory>>,
     automatic_library_patches: Vec<(Box<Fn(AnyModulePatch)>, Arc<u32>)>,
@@ -141,6 +130,7 @@ impl PatcherState {
     fn new() -> PatcherState {
         PatcherState {
             patches: Vec::new(),
+            disabled_patches: Vec::new(),
             exec_heap: platform::ExecutableHeap::new(),
             library_load_hooks: Vec::new(),
             automatic_library_patches: Vec::new(),
@@ -161,6 +151,26 @@ fn find_or_create_mod_patch_vec<'a>(patches: &'a mut Vec<(Option<OsString>, Vec<
         }
     };
     &mut patches[position].1
+}
+
+fn unprotect_module(module: &Option<OsString>) -> (usize, platform::MemoryProtection) {
+    let handle = match *module {
+        None => platform::exe_handle(),
+        Some(ref lib) => platform::library_handle(lib.as_ref()),
+    };
+    (handle as usize, platform::MemoryProtection::new(handle))
+}
+
+fn merge_patchvec(to: &mut Vec<(Option<OsString>, Vec<Arc<PatchHistory>>)>,
+                  source: Vec<(Option<OsString>, Vec<Arc<PatchHistory>>)>)
+{
+    for (module, patches) in source {
+        if let Some(pair) = to.iter_mut().find(|&&mut (ref m, _)| *m == module) {
+            pair.1.extend(patches);
+            continue;
+        }
+        to.push((module, patches));
+    }
 }
 
 impl<'a> ActivePatcher<'a> {
@@ -270,6 +280,32 @@ impl<'a> ActivePatcher<'a> {
     {
         unsafe { _hook.custom_calling_convention(target, &mut self.state.exec_heap) }
     }
+
+    /// Unapplies all patches.
+    ///
+    /// Use `repatch()` to reapply them.
+    pub unsafe fn unpatch(&mut self) {
+        for &mut (ref module, ref mut patches) in self.state.patches.iter_mut() {
+            let (base, _protection) = unprotect_module(module);
+            for patch in patches.iter_mut() {
+                patch.ty.disable(base);
+            }
+        }
+        let patches = mem::replace(&mut self.state.patches, Vec::new());
+        merge_patchvec(&mut self.state.disabled_patches, patches);
+    }
+
+    /// Reapplies all patches that were previously removed with `unpatch()`.
+    pub unsafe fn repatch(&mut self) {
+        for &mut (ref module, ref mut patches) in self.state.disabled_patches.iter_mut() {
+            let (base, _protection) = unprotect_module(module);
+            for patch in patches.iter_mut() {
+                patch.ty.enable(base);
+            }
+        }
+        let patches = mem::replace(&mut self.state.disabled_patches, Vec::new());
+        merge_patchvec(&mut self.state.patches, patches);
+    }
 }
 
 /// A patcher which can patch any module.
@@ -314,6 +350,7 @@ impl<'a> AnyModulePatch<'a> {
                     ty: ty,
                     all_modules_id: self.all_modules_id,
                 });
+                unsafe { patch.ty.enable(self.base); }
                 let weak = Arc::downgrade(&patch);
                 self.parent_patches.push(patch);
                 Some(Patch(PatchEnum::Single(weak)))
@@ -362,15 +399,12 @@ impl<'a> ModulePatch<'a> {
     #[doc(hidden)]
     pub unsafe fn hook_closure_internal<H, T>(&mut self, preserve_regs: bool, _hook: H, target: T) -> Patch
     where H: AddressHookClosure<T> {
-        let func = H::address(self.base);
-        let wrapper = platform::jump_hook::<H, T>(Some(func as *mut u8),
-                                                  target,
-                                                  self.exec_heap,
-                                                  preserve_regs);
+        let ty = platform::jump_hook::<H, T>(self.base, target, self.exec_heap, preserve_regs);
         let patch = Arc::new(PatchHistory {
-            ty: PatchType::BasicHook(func - self.base, wrapper),
+            ty: ty,
             all_modules_id: 0,
         });
+        patch.ty.enable(self.base);
         let weak = Arc::downgrade(&patch);
         self.parent_patches.push(patch);
         Patch(PatchEnum::Single(weak))

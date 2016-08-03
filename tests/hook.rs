@@ -97,16 +97,30 @@ fn address_hooking() {
         assert!(func3 != null_mut());
 
         let func = std::mem::transmute::<_, extern fn(u32, u32, u32, u32, u32) -> u32>(func);
-        let result = func(1, 2, 3, 4, 5);
-        assert_eq!(result, 2505397621);
-
         let func2 = std::mem::transmute::<_, extern fn(u32, u32, u32) -> u32>(func2);
-        let result = func2(0x12, 0x34, 0x56);
-        assert_eq!(result, 6);
-
         let func3 = std::mem::transmute::<_, extern fn(u32, u32, u32, u32, u32) -> u32>(func3);
-        let result = func3(0x12, 0x34, 0x56, 0x78, 0x9a);
-        assert_eq!(result, 0x6f1c);
+
+        let assert_nonhooked = || {
+            let result = func(1, 2, 3, 4, 5);
+            assert_eq!(result, 2505397621);
+            let result = func2(0x12, 0x34, 0x56);
+            assert_eq!(result, 6);
+            let result = func3(0x12, 0x34, 0x56, 0x78, 0x9a);
+            assert_eq!(result, 0x6f1c);
+        };
+        let assert_hooked = || {
+            let result = func(1, 2, 3, 4, 5);
+            assert_eq!(result, 3937053386);
+            // TODO: x86_64 doesn't work
+            if cfg!(target_arch = "x86") {
+                let result = func2(0x12, 0x34, 0x56);
+                assert_eq!(result, 0x26a);
+                let result = func3(0x12, 0x34, 0x56, 0x78, 0x9a);
+                assert_eq!(result, 0x4128);
+            }
+        };
+
+        assert_nonhooked();
 
         let patcher = Patcher::new();
         {
@@ -126,15 +140,20 @@ fn address_hooking() {
                 });
             });
         }
-        let result = func(1, 2, 3, 4, 5);
-        assert_eq!(result, 3937053386);
-        // TODO: x86_64 doesn't work
-        if cfg!(target_arch = "x86") {
-            let result = func2(0x12, 0x34, 0x56);
-            assert_eq!(result, 0x26a);
-            let result = func3(0x12, 0x34, 0x56, 0x78, 0x9a);
-            assert_eq!(result, 0x4128);
+
+        assert_hooked();
+
+        println!("Testing unpatching");
+        {
+            let mut patcher = patcher.lock().unwrap();
+            patcher.unpatch();
         }
+        assert_nonhooked();
+        {
+            let mut patcher = patcher.lock().unwrap();
+            patcher.repatch();
+        }
+        assert_hooked();
     }
 }
 
