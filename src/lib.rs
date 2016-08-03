@@ -437,6 +437,7 @@ impl<'a> ModulePatch<'a> {
         }
     }
 
+    #[inline]
     pub fn base(&self) -> usize {
         self.base
     }
@@ -482,6 +483,7 @@ impl<'a> ops::Deref for ModulePatchWithBase<'a> {
 }
 
 impl<'a> ops::DerefMut for ModulePatchWithBase<'a> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut ModulePatch<'a> {
         &mut self.patch
     }
@@ -493,13 +495,13 @@ pub trait ToPointer {
 
 impl ToPointer for usize {
     fn ptr(&self) -> *mut u8 {
-        unsafe { mem::transmute(*self) }
+        *self as *mut u8
     }
 }
 
 impl<T> ToPointer for *mut T {
     fn ptr(&self) -> *mut u8 {
-        unsafe { mem::transmute::<*mut T, *mut u8>(*self) }
+        *self as *mut u8
     }
 }
 
