@@ -510,37 +510,6 @@ pub unsafe fn redirect_stderr<F: AsRef<Path>>(filename: F) -> bool {
     platform::redirect_stderr(filename.as_ref())
 }
 
-#[doc(hidden)]
-pub trait HookableAsmWrap {
-    type Target; // extern "C" fn(a1_type, a2_type, ...) -> ret
-    type OptionalTarget; // fn(a1_type, a2_type, ...) -> Option<ret>
-    unsafe fn get_hook_wrapper() -> *const u8;
-
-    // stdcall/etc args, cdecl returns 0
-    fn stack_args_count() -> usize;
-    // All args
-    fn arg_count() -> usize;
-    // Hook-specific code in platform::optional_hook
-    fn opt_push_args_asm() -> &'static [u8];
-    // Casted from the function pointer
-    fn opt_hook_intermediate() -> *mut u8;
-
-    fn address() -> usize;
-    fn expected_base() -> usize;
-}
-
-// This could also be just a vector that gets the dynamic parts of
-// actual hook address and intermediate address as input, but having
-// everything completely constant should be a bit faster
-#[doc(hidden)]
-pub struct OptHookWrapper {
-    // There is push dword hook_address instruction at beginning of asm wrapper
-    // placed in platform::optional_hook
-    pub call: &'static [u8],
-    pub intermediate_wrapper: *const u8,
-    pub exit: &'static [u8],
-}
-
 pub struct Variable<T> {
     pub address: usize,
     pub phantom: PhantomData<T>,
