@@ -193,7 +193,8 @@ macro_rules! whack_funcs {
 macro_rules! whack_fnwrap_write {
     ($is_stdcall:expr, $addr:expr, $buf:expr, $diff:expr, [$($args:tt)*]) => {
         $buf.new_fnwrap();
-        whack_name_args!([fnwrap, $is_stdcall, $addr, $buf, $diff], [$([$args])*]);
+        whack_name_args!([fnwrap, $is_stdcall, $addr, $buf], [$([$args])*]);
+        $buf.finish_fnwrap($addr.wrapping_add($diff), $is_stdcall);
     }
 }
 
@@ -230,21 +231,20 @@ macro_rules! whack_fndecl {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! whack_fnwrap_write_separated {
-    ($is_stdcall:expr, $addr:expr, $buf:expr, $diff:expr, $([$argloc:ident ~ $argpos:expr])*) => {{
+    ($is_stdcall:expr, $addr:expr, $buf:expr, $([$argloc:ident ~ $argpos:expr])*) => {{
         $(whack_fnwrap_write_arg!($is_stdcall, $addr, $buf, [$argloc ~ $argpos]);)*
-        $buf.finish_fnwrap($addr.wrapping_add($diff), $is_stdcall);
     }}
 }
 
 #[macro_export]
 #[doc(hidden)]
 macro_rules! whack_fnwrap_write_arg {
-    ($is_stdcall:expr, $addr:expr, $buf:expr, [stack ~ $apos:expr]) => {{
+    ($is_stdcall:expr, $addr:expr, $buf:expr, [stack ~ $apos:expr]) => {
         $buf.stack($apos);
-    }};
-    ($is_stdcall:expr, $addr:expr, $buf:expr, [$aloc:ident ~ $apos:expr]) => {{
+    };
+    ($is_stdcall:expr, $addr:expr, $buf:expr, [$aloc:ident ~ $apos:expr]) => {
         $buf.register(reg_id!($aloc));
-    }};
+    };
 }
 
 #[macro_export]
