@@ -157,6 +157,7 @@ macro_rules! whack_vars {
             address: 0,
             phantom: ::std::marker::PhantomData,
         };)*
+        #[cold]
         pub unsafe fn $init_fn(patch: &mut $crate::ModulePatch) {
             let diff = patch.base() - $base;
             $($name.address = $addr + diff;)*
@@ -168,6 +169,7 @@ macro_rules! whack_vars {
 macro_rules! whack_funcs {
     (stdcall, $init_fn:ident, $base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
         $(whack_fn!(pub $name($($args)*) $(-> $ret)*);)*
+        #[cold]
         pub unsafe fn $init_fn(patch: &mut $crate::ModulePatch) {
             let diff = patch.base() - $base;
             let mut buf = $crate::platform::FuncAssembler::new();
@@ -178,6 +180,7 @@ macro_rules! whack_funcs {
     };
     ($init_fn:ident, $base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
         $(whack_fn!(pub $name($($args)*) $(-> $ret)*);)*
+        #[cold]
         pub unsafe fn $init_fn(patch: &mut $crate::ModulePatch) {
             let diff = patch.base() - $base;
             let mut buf = $crate::platform::FuncAssembler::new();
