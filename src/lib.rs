@@ -437,6 +437,10 @@ impl<'a> ModulePatch<'a> {
         }
     }
 
+    pub fn any_module_patch(&mut self) -> AnyModulePatch {
+        self.any_module_downgrade(0)
+    }
+
     #[inline]
     pub fn base(&self) -> usize {
         self.base
