@@ -2,6 +2,7 @@
 #[link_args = "-static-libgcc"]
 extern {}
 extern crate byteorder;
+extern crate lde;
 extern crate libc;
 extern crate kernel32;
 extern crate winapi;

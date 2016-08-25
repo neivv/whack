@@ -1,7 +1,9 @@
 use std::mem;
 use std::ptr;
+use std::slice;
 use std::io::Write;
 
+use lde::{self, InsnSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use smallvec::SmallVec;
 
@@ -500,96 +502,38 @@ impl AssemblerBuf {
     }
 }
 
-unsafe fn x86_sib_ins_size(ins: *const u8) -> usize {
-    let sib = if (*ins.offset(1) & 0x7) == 0x4 { 1 } else { 0 };
-    match (*ins.offset(1) & 0xc0) >> 6 {
-        0 => if (*ins.offset(1) & 0x7) == 0x5 { 6 + sib } else { 2 + sib },
-        1 => 3 + sib,
-        2 => 6 + sib,
-        _ => 2, // No sib
-    }
-}
-
-unsafe fn x86_ext_ins_size(ins: *const u8) -> usize {
-    match *ins.offset(1) {
-        0xb6 | 0xb7 => x86_sib_ins_size(ins) + 1,
-        n => panic!("Unimpl ext ins size 0x{:x}", n),
-    }
-}
-
-unsafe fn x86_ins_size(ins: *const u8) -> usize {
-    single_ins_len(ins, false)
-}
-
-unsafe fn single_ins_len(ins: *const u8, size_override: bool) -> usize {
-    let imm32_16 = if size_override { 2 } else { 4 };
-    match *ins {
-        0xf => x86_ext_ins_size(ins),
-        0x50 ... 0x61 | 0x90 | 0xc3 | 0xcc => 1,
-        0xc2 => 3,
-        0x66 => single_ins_len(ins.offset(1), true) + 1,
-        0x68 => imm32_16 + 1,
-        0x00 ... 0x03 | 0x84 ... 0x8f | 0xff => x86_sib_ins_size(ins),
-        0x83 | 0xc0 | 0xc1 | 0xc6 => x86_sib_ins_size(ins) + 1,
-        0x81 => x86_sib_ins_size(ins) + imm32_16,
-        0xb0 ... 0xb7 => 2,
-        0xb8 ... 0xbf => x86_sib_ins_size(ins) + imm32_16,
-        0xc7 => x86_sib_ins_size(ins) + imm32_16,
-        0xa1 | 0xe8 | 0xe9 => 5,
-        n => panic!("Unimpl ins size 0x{:x}", n),
-    }
-}
-
 pub unsafe fn copy_instruction_length(ins: *const u8, min_length: usize) -> usize {
-    let mut pos = 0;
-    while pos < min_length {
-        pos += x86_ins_size(ins.offset(pos as isize));
+    let mut sum = 0;
+    for (opcode, _) in lde::x86::iter(slice::from_raw_parts(ins, min_length + 32), 0) {
+        if sum >= min_length {
+            break;
+        }
+        sum += opcode.0.len();
     }
-    pos
+    sum
 }
 
-unsafe fn copy_instructions(mut src: *const u8, mut dst: *mut u8, len: usize) {
-    let mut len = len as isize;
-    while len > 0 {
-        let ins_len = x86_ins_size(src) as isize;
+unsafe fn copy_instructions(src: *const u8, mut dst: *mut u8, min_length: usize) {
+    let mut len = min_length as isize;
+    for (opcode, _) in lde::x86::iter(slice::from_raw_parts(src, min_length + 32), 0) {
+        if len <= 0 {
+            return;
+        }
+        let ins_len = opcode.0.len() as isize;
         // Relative jumps need to be handled differently
-        match *src {
+        match opcode.0[0] {
             0xe8 | 0xe9 => {
                 assert!(ins_len == 5);
-                ptr::copy_nonoverlapping(src, dst, 5);
-                let diff = (dst as usize).wrapping_sub(src as usize);
+                ptr::copy_nonoverlapping(opcode.0.as_ptr(), dst, 5);
+                let diff = (dst as usize).wrapping_sub(opcode.0.as_ptr() as usize);
                 let value = *(dst.offset(1) as *mut usize);
                 *(dst.offset(1) as *mut usize) = value.wrapping_sub(diff);
 
             }
-            _ => ptr::copy_nonoverlapping(src, dst, ins_len as usize),
+            _ => ptr::copy_nonoverlapping(opcode.0.as_ptr(), dst, ins_len as usize),
         }
-        src = src.offset(ins_len);
         dst = dst.offset(ins_len);
         len -= ins_len;
     }
-}
-
-#[test]
-fn test_x86_ins_size() {
-    let inss = vec![vec![0x89, 0x45, 0xfc], vec![0xc6, 0x05, 0xfb, 0x01, 0xe8, 0xdc, 0xfa],
-    vec![0xc6, 0x45, 0xfb, 0x01], vec![0x55], vec![0x60], vec![0x8b, 0xec], vec![0x83, 0xec, 0x0c]];
-    unsafe {
-        for ins in inss {
-            assert_eq!(ins.len(), x86_ins_size(ins.as_ptr()));
-        }
-    }
-}
-
-#[test]
-fn test_x86_copy_ins() {
-    let ins1 = vec![0x89, 0x45, 0xfc, 0xff];
-    let mut ins2 = vec![0xe8, 0x50, 0x60, 0x70, 0x80, 0xff, 0xff, 0xff, 0xff, 0xff];
-    unsafe {
-        let mut tgt = vec![0; 5];
-        copy_instructions(ins1.as_ptr(), tgt.as_mut_ptr(), 1);
-        assert_eq!(tgt, vec![0x89, 0x45, 0xfc, 0x00, 0x00]);
-        copy_instructions(ins2.as_ptr(), ins2.as_mut_ptr().offset(5), 1);
-        assert_eq!(ins2, vec![0xe8, 0x50, 0x60, 0x70, 0x80, 0xe8, 0x4b, 0x60, 0x70, 0x80]);
-    }
+    panic!("Could not disassemble {:x}", src as usize);
 }
