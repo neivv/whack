@@ -150,6 +150,46 @@ macro_rules! impl_export_hook {
     }
 }
 
+/// Declares a list of global variables of a module, which can be accessed with unsafe code.
+///
+/// The macro arguments are `init_fn`, `base_address`, and a list of variable declarations
+/// in form `address => name: type;`
+///
+/// `init_fn` is a identifier of a function taking a
+/// [`&mut ModulePatch`](struct.ModulePatch.html), which must be called to initialize the
+/// addresses before they are used. This is necessary for handling situations when the module's
+/// base address differs from the one specified in `base_address`.
+///
+/// # Examples
+/// ```rust,no_run
+/// # #[macro_use] extern crate whack;
+/// # fn main() {}
+///
+/// whack_vars!(init_vars, 0x00400000,
+///     0x00400123 => value: u8;
+///     0x00400185 => pointer: *mut u32;
+///     0x0040023D => array: [u8; 32];
+/// );
+/// fn access_variables() {
+///     let mut patcher = whack::Patcher::new();
+///     {
+///         let mut active_patcher = patcher.lock().unwrap();
+///         unsafe {
+///             active_patcher.patch_exe(|mut patch| {
+///                 init_vars(&mut patch);
+///             });
+///         }
+///     }
+///
+///     // Variables are accessed by dereferencing them.
+///     // As they are mutable global state, that is an unsafe operation.
+///     unsafe {
+///         *value += array[5];
+///         let x: u32 = **pointer;
+///         array[10] = x as u8;
+///     }
+/// }
+/// ```
 #[macro_export]
 macro_rules! whack_vars {
     ($init_fn:ident, $base:expr, $($addr:expr => $name:ident: $ty:ty;)*) => {
@@ -165,6 +205,69 @@ macro_rules! whack_vars {
     };
 }
 
+
+/// Declares module's internal functions, allowing calling conventions which use registers.
+///
+/// The macro arguments are `init_fn`, `base_address`, and a list of function declarations
+/// in one of following forms:
+///
+/// * `address => name(args) -> ret;`
+/// * `address => name(args);`
+///
+/// The arguments can use syntax `@reg type` to specify that an argument is in a register,
+/// otherwise it is placed to stack. However, if no `@reg` specifiers exist in the argument list,
+/// the declaration is interpreted to mean same calling convention as in `extern "C"` (Which
+/// means that on x86_64, `x(u8, u8, u8, u8, u8)` is same as
+/// `x(@rcx u8, @rdx u8, @r8 u8, @r9 u8, u8)`.
+///
+/// The default calling convention requires callers to clear stack. If callee-clean
+/// is needed, it is specified with `whack_funcs!(stdcall, init_fn, base, ...);`.
+///
+/// `init_fn` is a identifier of a function taking a
+/// [`&mut ModulePatch`](struct.ModulePatch.html), which must be called to initialize the
+/// functions before they are used. This is necessary for handling situations when the module's
+/// base address differs from the one specified in `base_address`.
+///
+/// # Examples
+/// ```rust,no_run
+/// # #[macro_use] extern crate whack;
+/// # fn main() {}
+///
+/// #[cfg(target_arch = "x86")]
+/// mod fun {
+///     whack_funcs!(stdcall, init_funcs, 0x00400000,
+///         0x00400000 => first(@eax u32, @edx u32) -> u32;
+///         0x00400400 => second(u32, u32, @edi u32, *mut u32);
+///     );
+/// }
+///
+/// #[cfg(target_arch = "x86_64")]
+/// mod fun {
+///     whack_funcs!(init_funcs, 0x00400000,
+///         0x00400000 => first(@rax u32, @rdx u32) -> u32;
+///         0x00400400 => second(u32, u32, @r14 u32, *mut u32);
+///     );
+/// }
+///
+/// fn use_funcs() {
+///     let mut patcher = whack::Patcher::new();
+///     {
+///         let mut active_patcher = patcher.lock().unwrap();
+///         unsafe {
+///             active_patcher.patch_exe(|mut patch| {
+///                 fun::init_funcs(&mut patch);
+///             });
+///         }
+///     }
+///
+///     // As the functions are both FFI and static mut function pointers,
+///     // calling them is unsafe.
+///     unsafe {
+///         let val = fun::first(1, 2);
+///         fun::second(val, 0, 17, std::ptr::null_mut());
+///     }
+/// }
+/// ```
 #[macro_export]
 macro_rules! whack_funcs {
     (stdcall, $init_fn:ident, $base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {

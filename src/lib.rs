@@ -319,6 +319,13 @@ pub struct AnyModulePatch<'a> {
     all_modules_id: u32,
 }
 
+/// A patcher for a specific module.
+///
+/// Allows module-specific operations which depend on base address, that is, hooking.
+///
+/// Created by `Patcher::patch_exe()` and `Patcher::patch_library()`.
+///
+/// Can be cast to `AnyModulePatch` with `any_module_downgrade()`.
 pub struct ModulePatch<'a> {
     parent_patches: &'a mut Vec<Arc<PatchHistory>>,
     exec_heap: &'a mut platform::ExecutableHeap,
@@ -327,6 +334,14 @@ pub struct ModulePatch<'a> {
     base: usize,
 }
 
+
+/// A patcher for a specific module with an excepted base address.
+///
+/// Has functionality to apply nop and constant patches to specific addresses.
+///
+/// Created by `Patcher::patch_exe_with_base()` and `Patcher::patch_library_with_base()`.
+///
+/// For convenience, `Deref`s to `ModulePatch`.
 pub struct ModulePatchWithBase<'a> {
     patch: ModulePatch<'a>,
     expected_base: usize
@@ -411,18 +426,26 @@ impl<'a> ModulePatch<'a> {
         Patch(PatchEnum::Single(weak))
     }
 
+    /// Applies a hook to a function.
+    ///
+    /// The original function will not be called afterwards. To apply a non-modifying hook, use
+    /// `call_hook()` or `hook_opt()`.
     pub unsafe fn hook<H>(&mut self, _hook: H, target: H::Fnptr) -> Patch
     where H: AddressHook,
     {
         _hook.hook(self, target)
     }
 
+    /// Applies a hook to a function, with possibility to call the original function during hook.
     pub unsafe fn hook_opt<H>(&mut self, _hook: H, target: H::OptFnptr) -> Patch
     where H: AddressHook,
     {
         _hook.hook_opt(self, target)
     }
 
+    /// Applies a hook to a function, without replacing any of the original code.
+    ///
+    /// This hook cannot return values.
     pub unsafe fn call_hook<H>(&mut self, _hook: H, target: H::Fnptr) -> Patch
     where H: AddressHook,
     {
@@ -438,10 +461,12 @@ impl<'a> ModulePatch<'a> {
         }
     }
 
+    /// Creates an `AnyModulePatch` from `self`.
     pub fn any_module_patch(&mut self) -> AnyModulePatch {
         self.any_module_downgrade(0)
     }
 
+    /// Retreives the current base address of the module.
     #[inline]
     pub fn base(&self) -> usize {
         self.base
