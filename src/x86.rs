@@ -7,7 +7,7 @@ use lde::{self, InsnSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use smallvec::SmallVec;
 
-use ModulePatch;
+use {ModulePatch, OrigFuncCallback};
 pub use win_common::*;
 
 pub fn nop() -> u8 {
@@ -35,12 +35,11 @@ fn is_preserved_reg(reg: u8) -> bool {
     }
 }
 
-pub struct WrapAssembler {
-    orig: *const u8,
-    fnptr_hook: bool,
-    stdcall: bool,
-    preserve_regs: bool,
+pub struct HookWrapAssembler {
+    rust_in_wrapper: *const u8,
+    target: *const u8,
     args: SmallVec<[Location; 8]>,
+    stdcall: bool,
 }
 
 pub struct FuncAssembler {
@@ -94,13 +93,13 @@ impl AsmValue {
     }
 }
 
-impl WrapAssembler {
-    pub fn new(orig_addr: *const u8, fnptr_hook: bool, stdcall: bool, preserve_regs: bool) -> WrapAssembler {
-        WrapAssembler {
-            orig: orig_addr,
-            fnptr_hook: fnptr_hook,
+impl HookWrapAssembler {
+    pub fn new(rust_in_wrapper: *const u8, target: *const u8, stdcall: bool) -> HookWrapAssembler
+    {
+        HookWrapAssembler {
+            rust_in_wrapper: rust_in_wrapper,
             stdcall: stdcall,
-            preserve_regs: preserve_regs,
+            target: target,
             args: SmallVec::new(),
         }
     }
@@ -110,113 +109,116 @@ impl WrapAssembler {
         self.args.push(arg);
     }
 
-    fn write_common(self, rust_in_wrapper: *const u8) -> AssemblerBuf {
+    /// Returns the buffer and possible offset for fixup original ptr for import hooks.
+    pub fn generate_wrapper_code(&self, orig: OrigFuncCallback) -> HookWrapCode {
+        let mut buffer = AssemblerBuf::new();
+        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, orig);
+        // Only write out wrappers when needed
+        let delayed_out = match orig {
+            OrigFuncCallback::Overwritten(orig) => {
+                self.write_out_wrapper(&mut buffer, out_wrapper_pos, Some(orig))
+            }
+            OrigFuncCallback::ImportHook => {
+                self.write_out_wrapper(&mut buffer, out_wrapper_pos, None)
+            }
+            OrigFuncCallback::None | OrigFuncCallback::Hook(_) => !0,
+        };
+        HookWrapCode {
+            buf: buffer,
+            import_fixup_offset: delayed_out,
+        }
+    }
+
+    // Returns fixup pos for out_wrapper's address
+    fn write_in_wrapper(&self, buffer: &mut AssemblerBuf, orig: OrigFuncCallback) -> AsmFixupPos {
+        if let OrigFuncCallback::Hook(_) = orig {
+            buffer.pushad();
+        }
+        buffer.push(AsmValue::Constant(self.target as u32));
+        let out_wrapper_pos = buffer.fixup_position();
+        buffer.push(AsmValue::Undecided);
+        for val in self.args.iter().rev() {
+            buffer.push(AsmValue::from_loc(val));
+        }
+        buffer.call(AsmValue::Constant(self.rust_in_wrapper as u32));
+        buffer.stack_add((self.args.len() + 2) * 4);
+        if let OrigFuncCallback::Hook(orig) = orig {
+            buffer.popad();
+            unsafe {
+                let len = copy_instruction_length(orig, 5);
+                buffer.copy_instructions(orig, len);
+                buffer.jump(AsmValue::Constant(orig as u32 + len as u32));
+            }
+        } else {
+            if self.stdcall {
+                let stack_arg_count = self.args.iter().filter_map(|x| x.stack_to_opt()).count();
+                buffer.ret(stack_arg_count * 4);
+            } else {
+                buffer.ret(0);
+            }
+        }
+        out_wrapper_pos
+    }
+
+    // Returns offset to fix delayed out address
+    fn write_out_wrapper(&self,
+                         buffer: &mut AssemblerBuf,
+                         out_wrapper_pos: AsmFixupPos,
+                         orig: Option<*const u8>,
+                        ) -> usize {
+        buffer.reset_stack_offset();
+        buffer.fixup_to_position(out_wrapper_pos);
+        for (pos, val) in self.args
+                .iter()
+                .enumerate()
+                .filter_map(|(pos, x)| x.reg_to_opt().map(|x| (pos, x))) {
+            buffer.mov(AsmValue::Register(val), AsmValue::Stack(pos as i16));
+        }
+        // Push stack args.
+        // Takes possible empty spots into account, so it became kind of complicated.
         let mut stack_args: SmallVec<[_; 8]> = self.args
             .iter()
             .enumerate()
             .filter_map(|(pos, x)| x.stack_to_opt().map(|x| (pos, x)))
             .collect();
 
-        let mut buffer = AssemblerBuf::new();
-        if self.preserve_regs {
-            buffer.pushad();
+        stack_args.sort_by_key(|&(_, target_pos)| target_pos);
+        for (pos, diff) in stack_args.last()
+            .map(|&(pos, _)| (pos, 1))
+            .into_iter()
+            .chain(stack_args
+                   .windows(2)
+                   .rev()
+                   .map(|tp| (tp[0].0, tp[1].1 - tp[0].1))
+            ) {
+            if diff > 1 {
+                buffer.stack_sub(diff as usize - 1);
+            }
+            buffer.push(AsmValue::Stack(pos as i16))
         }
-        let target_addr_pos = buffer.fixup_position();
-        buffer.push(AsmValue::Undecided);
-        let out_wrapper_pos = buffer.fixup_position();
-        buffer.push(AsmValue::Undecided);
-        for val in self.args.iter().rev() {
-            buffer.push(AsmValue::from_loc(val));
+        if let Some(s) = stack_args.first() {
+            buffer.stack_sub(s.1 as usize * 4);
         }
-        buffer.call(AsmValue::Constant(rust_in_wrapper as u32));
-        buffer.stack_add((self.args.len() + 2) * 4);
-        if self.preserve_regs {
-            buffer.popad();
+
+        let delayed_out = if let Some(orig) = orig {
+            // Push return address manually
             unsafe {
-                let len = copy_instruction_length(self.orig, 5);
-                buffer.copy_instructions(self.orig, len);
-                buffer.jump(AsmValue::Constant(self.orig as u32 + len as u32));
+                let len = copy_instruction_length(orig, 5);
+                let ret_address = buffer.fixup_position();
+                buffer.push(AsmValue::Undecided);
+                buffer.copy_instructions(orig, len);
+                buffer.jump(AsmValue::Constant(orig as u32 + len as u32));
+                buffer.fixup_to_position(ret_address);
             }
+            !0
         } else {
-            buffer.ret(if self.stdcall { stack_args.len() * 4 } else { 0 });
-        }
-
-        // Don't write out wrappers for calling convention hacks
-        if self.orig != ptr::null_mut() {
-            buffer.reset_stack_offset();
-            buffer.fixup_to_position(out_wrapper_pos);
-            for (pos, val) in self.args
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(pos, x)| x.reg_to_opt().map(|x| (pos, x))) {
-                buffer.mov(AsmValue::Register(val), AsmValue::Stack(pos as i16));
-            }
-            // Push stack args.
-            // Takes possible empty spots into account, so it became kind of complicated.
-            stack_args.sort_by_key(|&(_, target_pos)| target_pos);
-            for (pos, diff) in stack_args.last()
-                .map(|&(pos, _)| (pos, 1))
-                .into_iter()
-                .chain(stack_args
-                       .windows(2)
-                       .rev()
-                       .map(|tp| (tp[0].0, tp[1].1 - tp[0].1))
-                ) {
-                if diff > 1 {
-                    buffer.stack_sub(diff as usize - 1);
-                }
-                buffer.push(AsmValue::Stack(pos as i16))
-            }
-            if let Some(s) = stack_args.first() {
-                buffer.stack_sub(s.1 as usize * 4);
-            }
-            if !self.fnptr_hook {
-                // Push return address manually
-                unsafe {
-                    let len = copy_instruction_length(self.orig, 5);
-                    let ret_address = buffer.fixup_position();
-                    buffer.push(AsmValue::Undecided);
-                    buffer.copy_instructions(self.orig, len);
-                    buffer.jump(AsmValue::Constant(self.orig as u32 + len as u32));
-                    buffer.fixup_to_position(ret_address);
-                }
-            } else {
-                buffer.call(AsmValue::Constant(self.orig as u32));
-            };
-            buffer.stack_add(if self.stdcall { 0 } else {
-                stack_args.last().map(|x| (x.1 + 1) as usize * 4).unwrap_or(0)
-            });
-            buffer.ret(0);
-        }
-        buffer.align(16);
-        buffer.fixup_to_position(target_addr_pos);
-        buffer
-    }
-
-    /// Returns pointer to the wrapper and original instruction length.
-    /// The original instructions will be copied to memory right before the wrapper.
-    pub fn write<Cb>(self,
-                     heap: &mut ExecutableHeap,
-                     rust_in_wrapper: *const u8,
-                     target_len: usize,
-                     write_callback: Cb,
-                    ) -> (*const u8, usize)
-    where Cb: FnOnce(*mut u8),
-    {
-        let orig = self.orig;
-        let orig_ins_len = if !self.fnptr_hook && orig != ptr::null() {
-            unsafe { copy_instruction_length(orig, 5) }
-        } else {
-            0
+            buffer.call_const(!0)
         };
-        let mut buffer = self.write_common(rust_in_wrapper);
-        let data = heap.allocate(buffer.len() + target_len + orig_ins_len);
-        if orig_ins_len != 0 {
-            unsafe { ptr::copy_nonoverlapping(orig, data, orig_ins_len) };
-        }
-        let wrapper = unsafe { data.offset(orig_ins_len as isize) };
-        buffer.write(wrapper, write_callback);
-        (wrapper, orig_ins_len)
+        buffer.stack_add(if self.stdcall { 0 } else {
+            stack_args.last().map(|x| (x.1 + 1) as usize * 4).unwrap_or(0)
+        });
+        buffer.ret(0);
+        delayed_out
     }
 }
 
@@ -285,7 +287,7 @@ impl FuncAssembler {
 
     pub fn write(&mut self, patch: &mut ModulePatch) -> *const u8 {
         let data = patch.exec_heap.allocate(self.buf.len());
-        self.buf.write(data, |_| { });
+        self.buf.write(data);
         data
     }
 
@@ -295,9 +297,51 @@ impl FuncAssembler {
     }
 }
 
-pub struct AssemblerBuf {
+/// Provides a way to reuse the hook wrapper for global module import hooks. Otherwise just
+/// a intermediate buffer for the code before it gets placed in exec memory.
+pub struct HookWrapCode {
+    buf: AssemblerBuf,
+    import_fixup_offset: usize,
+}
+
+impl HookWrapCode {
+    /// Allocates a chunk of executable memory and writes all parts of function entry wrapper
+    /// there. (Original code, in wrapper, out wrapper, rust objects), in that order.
+    ///
+    /// Returns pointer to the wrapper and original instruction length.
+    /// The original instructions will be copied to memory right before the wrapper,
+    /// to be used when patch is disabled.
+    pub fn write_wrapper(&self,
+                         orig: Option<*const u8>,
+                         heap: &mut ExecutableHeap,
+                         import_fixup: Option<*const u8>,
+                        ) -> (*const u8, usize)
+    {
+        let orig_ins_len = match orig {
+            Some(orig) => { unsafe { copy_instruction_length(orig, 5) } },
+            None => 0,
+        };
+        let wrapper_len = self.buf.len() + orig_ins_len;
+        let data = heap.allocate(wrapper_len);
+        if let Some(orig) = orig {
+            unsafe { ptr::copy_nonoverlapping(orig, data, orig_ins_len) };
+        }
+        let wrapper = unsafe { data.offset(orig_ins_len as isize) };
+        self.buf.write(wrapper);
+        if let Some(fixup) = import_fixup {
+            unsafe {
+                let offset = self.import_fixup_offset as isize;
+                *(wrapper.offset(offset) as *mut usize) = fixup as usize;
+            }
+        }
+        (wrapper, orig_ins_len)
+    }
+}
+
+struct AssemblerBuf {
     buf: Vec<u8>,
     fixups: SmallVec<[usize; 8]>,
+    // Import hooks
     stack_offset: i32,
 }
 
@@ -330,12 +374,6 @@ impl AssemblerBuf {
         (&mut self.buf[off .. off + 4]).write_u32::<LittleEndian>(val).unwrap();
     }
 
-    pub fn align(&mut self, amount: usize) {
-        while self.buf.len() % amount != 0 {
-            self.buf.push(0xcc);
-        }
-    }
-
     pub unsafe fn copy_instructions(&mut self, source: *const u8, amt: usize) {
         self.buf.reserve(amt);
         copy_instructions(source, self.buf.as_mut_ptr().offset(self.buf.len() as isize), amt);
@@ -343,16 +381,14 @@ impl AssemblerBuf {
         self.buf.set_len(new_len);
     }
 
-    // TODO: ´write_target´ is only relevant for hooks :l
-    pub fn write<Cb: FnOnce(*mut u8)>(&mut self, data: *mut u8, write_target: Cb) {
-        let diff = (data as usize).wrapping_sub(self.buf.as_ptr() as usize);
-        for &fixup in self.fixups.iter() {
-            let prev = (&self.buf[fixup .. fixup + 4]).read_u32::<LittleEndian>().unwrap();
-            (&mut self.buf[fixup .. fixup + 4]).write_u32::<LittleEndian>(prev.wrapping_add(diff as u32)).unwrap();
-        }
+    fn write(&self, out: *mut u8) {
+        let diff = (out as usize).wrapping_sub(self.buf.as_ptr() as usize);
         unsafe {
-            copy_instructions(self.buf.as_ptr(), data, self.buf.len());
-            write_target(data.offset(self.buf.len() as isize));
+            copy_instructions(self.buf.as_ptr(), out, self.buf.len());
+            for &fixup in self.fixups.iter() {
+                let prev = (&self.buf[fixup .. fixup + 4]).read_u32::<LittleEndian>().unwrap();
+                *(out.offset(fixup as isize) as *mut u32) = prev.wrapping_add(diff as u32);
+            }
         }
     }
 
@@ -490,15 +526,23 @@ impl AssemblerBuf {
     pub fn call(&mut self, target: AsmValue) {
         match target {
             AsmValue::Constant(dest) => {
-                self.buf.write(&[0xc7, 0x44, 0xe4, 0xfc]).unwrap();
-                self.buf.write_u32::<LittleEndian>(dest).unwrap();
-                self.buf.write(&[0xff, 0x54, 0xe4, 0xfc]).unwrap();
+                self.call_const(dest);
             }
             AsmValue::Register(dest) => {
                 self.buf.write(&[0xff, 0xd0 + dest]).unwrap();
             }
             _ => unimplemented!(),
         }
+    }
+
+    // Returns position of dest so it can be overwritten later
+    pub fn call_const(&mut self, target: u32) -> usize {
+        // Mov [esp-4], addr; call [esp - 4]
+        self.buf.write(&[0xc7, 0x44, 0xe4, 0xfc]).unwrap();
+        let ret = self.buf.len();
+        self.buf.write_u32::<LittleEndian>(target).unwrap();
+        self.buf.write(&[0xff, 0x54, 0xe4, 0xfc]).unwrap();
+        ret
     }
 }
 

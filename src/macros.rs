@@ -1,40 +1,50 @@
-pub trait AddressHookClosure<Callback> {
+use std::borrow::Cow;
+
+use Patch;
+
+pub trait AddressHookClosure<Callback>: AddressHook {
     fn address(base: usize) -> usize;
-    unsafe fn write_wrapper(preserve_regs: bool,
-                            target: Callback,
-                            orig_addr: Option<*const u8>,
-                            exec_heap: &mut ::platform::ExecutableHeap
-                           ) -> (*const u8, usize);
+    /// Writes pointer to the closure object and the closure itself to memory, they obviously
+    /// cannot be relocated afterwards. The boxed slice's beginning ptr is points to the
+    /// closure pointer itself (It can be passed to HookWrapCode::write_wrapper).
+    fn write_target_objects(target: Callback) -> Box<[u8]>;
 }
 
 pub trait AddressHook {
     type Fnptr;
     type OptFnptr;
-    unsafe fn hook<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::Fnptr) -> ::Patch;
-    unsafe fn hook_opt<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::OptFnptr) -> ::Patch;
-    unsafe fn call_hook<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::Fnptr) -> ::Patch;
+    unsafe fn hook<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::Fnptr) -> Patch;
+    unsafe fn hook_opt<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::OptFnptr) -> Patch;
+    unsafe fn call_hook<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::Fnptr) -> Patch;
     unsafe fn custom_calling_convention<'a>(self,
                                             val: Self::Fnptr,
-                                            exec_heap: &mut ::platform::ExecutableHeap
+                                            exec_heap: &mut ::platform::ExecutableHeap,
                                             ) -> *const u8;
+    /// Generates the wrapper code, which may be used multiple times.
+    ///
+    /// `target` must be kept alive as long as any of the wrappers generated exist.
+    fn wrapper_assembler(target: *const u8) -> ::platform::HookWrapAssembler;
 }
 
-pub trait ExportHookClosure<Callback> {
+pub trait ExportHookClosure<Callback>: ExportHook {
     fn default_export() -> ::Export<'static>;
-    unsafe fn write_wrapper(preserve_regs: bool,
-                            target: Callback,
-                            orig_addr: Option<*const u8>,
-                            exec_heap: &mut ::platform::ExecutableHeap
-                           ) -> (*const u8, usize);
+    fn write_target_objects(target: Callback) -> Box<[u8]>;
 }
 
 pub trait ExportHook {
     type Fnptr;
     type OptFnptr;
-    fn import<'a>(self, patch: &mut ::AnyModulePatch<'a>, dll: &[u8],
-                  val: Self::Fnptr) -> Option<::Patch>;
-    fn import_opt<'a>(self, patch: &mut ::AnyModulePatch<'a>, dll: &[u8],
-                  val: Self::OptFnptr) -> Option<::Patch>;
+    fn import(self,
+              patch: &mut ::AllModulesPatcher,
+              dll: Cow<'static, [u8]>,
+              val: Self::Fnptr
+              ) -> Patch;
+    fn import_opt(self,
+                  patch: &mut ::AllModulesPatcher,
+                  dll: Cow<'static, [u8]>,
+                  val: Self::OptFnptr
+                  ) -> Patch;
+    fn wrapper_assembler(target: *const u8) -> ::platform::HookWrapAssembler;
 }
 
 #[macro_export]
@@ -87,65 +97,85 @@ macro_rules! address_hook {
 
 #[macro_export]
 #[doc(hidden)]
-macro_rules! impl_address_hook {
-    ($name:ident, $ret:ty, [$($aty:ty),*], [$($an:ident),*]) => {
-        impl $crate::AddressHook for $name {
-            type Fnptr = unsafe fn($($aty),*) -> $ret;
-            type OptFnptr = unsafe fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
-            unsafe fn hook<'a>(self, patch: &mut $crate::ModulePatch<'a>, val: Self::Fnptr) -> $crate::Patch
+macro_rules! whack_addr_hook_common {
+    ($ret:ty, [$($aty:ty),*], [$($an:ident),*]) => {
+        type Fnptr = unsafe fn($($aty),*) -> $ret;
+        type OptFnptr = unsafe fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
+        unsafe fn hook<'a>(self, patch: &mut $crate::ModulePatch<'a>, val: Self::Fnptr) -> $crate::Patch
+        {
+            patch.hook_closure(self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
+                val($($an),*)
+            })
+        }
+
+        unsafe fn hook_opt<'a>(self, patch: &mut $crate::ModulePatch<'a>, val: Self::OptFnptr) -> $crate::Patch
+        {
+            patch.hook_closure(self, move |$($an,)* orig: &Fn($($aty),*) -> $ret| {
+                val($($an,)* orig)
+            })
+        }
+
+        unsafe fn call_hook<'a>(self, patch: &mut $crate::ModulePatch<'a>, val: Self::Fnptr) -> $crate::Patch
+        {
+            patch.hook_closure_internal(true, self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
+                val($($an),*)
+            })
+        }
+
+        unsafe fn custom_calling_convention<'a>(self,
+                                                val: Self::Fnptr,
+                                                exec_heap: &mut $crate::platform::ExecutableHeap
+                                                ) -> *const u8
+        {
+            // So that H becomes a valid type
+            fn x<H, T>(target: T, exec_heap: &mut $crate::platform::ExecutableHeap) -> *const u8
+            where H: $crate::AddressHookClosure<T>
             {
-                patch.hook_closure(self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
-                    val($($an),*)
-                })
-            }
-            unsafe fn hook_opt<'a>(self, patch: &mut $crate::ModulePatch<'a>, val: Self::OptFnptr) -> $crate::Patch
-            {
-                patch.hook_closure(self, move |$($an,)* orig: &Fn($($aty),*) -> $ret| {
-                    val($($an,)* orig)
-                })
-            }
-            unsafe fn call_hook<'a>(self, patch: &mut $crate::ModulePatch<'a>, val: Self::Fnptr) -> $crate::Patch
-            {
-                patch.hook_closure_internal(true, self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
-                    val($($an),*)
-                })
-            }
-            unsafe fn custom_calling_convention<'a>(self,
-                                                    val: Self::Fnptr,
-                                                    exec_heap: &mut $crate::platform::ExecutableHeap
-                                                    ) -> *const u8
-            {
-                let target = move |$($an,)* _: &Fn($($aty),*) -> $ret| {
-                    val($($an),*)
+                let target_closure = {
+                    let data = H::write_target_objects(target);
+                    // "Memory leak", should return (*const u8, Patch)
+                    unsafe { (*Box::into_raw(data)).as_ptr() }
                 };
-                $crate::platform::hook_wrapper::<Self, _>(None, target, exec_heap, false).0
-                    as *const u8
+                let (wrapper, _) = H::wrapper_assembler(target_closure)
+                    .generate_wrapper_code($crate::OrigFuncCallback::None)
+                    .write_wrapper(None, exec_heap, None);
+                wrapper as *const u8
             }
+
+            let target = move |$($an,)* _: &Fn($($aty),*) -> $ret| {
+                val($($an),*)
+            };
+
+            x::<Self, _>(target, exec_heap)
         }
     }
 }
 
 #[macro_export]
 #[doc(hidden)]
-macro_rules! impl_export_hook {
-    ($name:ident, $ret:ty, [$($aty:ty),*], [$($an:ident),*]) => {
-        impl $crate::ExportHook for $name {
-            type Fnptr = unsafe fn($($aty),*) -> $ret;
-            type OptFnptr = unsafe fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
-            fn import<'a>(self, patch: &mut $crate::AnyModulePatch<'a>, dll: &[u8],
-                          val: Self::Fnptr) -> Option<$crate::Patch>
-            {
-                patch.import_hook_closure(dll, self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
-                    unsafe { val($($an),*) }
-                })
-            }
-            fn import_opt<'a>(self, patch: &mut $crate::AnyModulePatch<'a>, dll: &[u8],
-                          val: Self::OptFnptr) -> Option<$crate::Patch>
-            {
-                patch.import_hook_closure(dll, self, move |$($an,)* orig: &Fn($($aty),*) -> $ret| {
-                    unsafe { val($($an,)* orig) }
-                })
-            }
+macro_rules! whack_export_hook_common {
+    ($ret:ty, [$($aty:ty),*], [$($an:ident),*]) => {
+        type Fnptr = unsafe fn($($aty),*) -> $ret;
+        type OptFnptr = unsafe fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
+        fn import(self,
+                  patch: &mut $crate::AllModulesPatcher,
+                  lib: ::std::borrow::Cow<'static, [u8]>,
+                  val: Self::Fnptr
+                 ) -> $crate::Patch
+        {
+            patch.import_hook_closure(lib, self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
+                unsafe { val($($an),*) }
+            })
+        }
+        fn import_opt(self,
+                      patch: &mut $crate::AllModulesPatcher,
+                      lib: ::std::borrow::Cow<'static, [u8]>,
+                      val: Self::OptFnptr
+                     ) -> $crate::Patch
+        {
+            patch.import_hook_closure(lib, self, move |$($an,)* orig: &Fn($($aty),*) -> $ret| {
+                unsafe { val($($an,)* orig) }
+            })
         }
     }
 }
@@ -329,6 +359,7 @@ macro_rules! whack_fn {
 #[doc(hidden)]
 macro_rules! whack_fndecl {
     ($name:ident, $ret:ty, $([$args:ty])*) => {
+        #[allow(non_upper_case_globals)]
         pub static mut $name: $crate::Func<extern fn($($args),*) -> $ret> =
             $crate::Func(0, ::std::marker::PhantomData);
     };

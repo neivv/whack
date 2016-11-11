@@ -14,7 +14,7 @@ use kernel32;
 use rust_win32error::Win32Error;
 use winapi::{self, HANDLE, HMODULE};
 
-use {AddressHookClosure, AnyModulePatch, Patcher, Export, ExportHookClosure};
+use {AddressHookClosure, AllModulesPatcher, Export, OrigFuncCallback, Patcher};
 use pe;
 
 pub enum PatchType {
@@ -56,11 +56,12 @@ impl PatchType {
 pub type LibraryHandle = HMODULE;
 
 mod hook {
-    use winapi::{HANDLE, HMODULE};
+    use winapi::{BOOL, HANDLE, HMODULE};
     export_hook!(pub extern "system" LoadLibraryA(*const i8) -> HMODULE);
     export_hook!(pub extern "system" LoadLibraryExA(*const i8, HANDLE, u32) -> HMODULE);
     export_hook!(pub extern "system" LoadLibraryW(*const u16) -> HMODULE);
     export_hook!(pub extern "system" LoadLibraryExW(*const u16, HANDLE, u32) -> HMODULE);
+    export_hook!(pub extern "system" FreeLibrary(HMODULE) -> BOOL);
 }
 
 fn winapi_str<T: AsRef<OsStr>>(input: T) -> Vec<u16> {
@@ -85,8 +86,13 @@ impl ExecutableHeap {
             handle: unsafe { kernel32::HeapCreate(winapi::HEAP_CREATE_ENABLE_EXECUTE, 0, 0) },
         }
     }
+
     pub fn allocate(&mut self, size: usize) -> *mut u8 {
         unsafe { kernel32::HeapAlloc(self.handle, 0, size as winapi::SIZE_T) as *mut u8 }
+    }
+
+    pub fn free(&mut self, ptr: *mut u8) {
+        unsafe { kernel32::HeapFree(self.handle, 0, ptr as winapi::LPVOID); }
     }
 }
 
@@ -186,35 +192,29 @@ pub unsafe fn redirect_stderr(filename: &Path) -> bool {
     }
 }
 
-// Separate for `custom_calling_convention`.
-pub unsafe fn hook_wrapper<H: AddressHookClosure<T>, T>(func: Option<*const u8>,
-                                                        target: T,
-                                                        exec_heap: &mut ExecutableHeap,
-                                                        preserve_regs: bool,
-                                                       ) -> (usize, usize)
-{
-    let result = H::write_wrapper(preserve_regs, target, func, exec_heap);
-    (result.0 as usize, result.1)
-}
-
 pub unsafe fn jump_hook<H: AddressHookClosure<T>, T>(base: usize,
                                                      target: T,
                                                      exec_heap: &mut ExecutableHeap,
                                                      preserve_regs: bool,
                                                     ) -> PatchType
 {
-    let func = H::address(base);
-    let (wrapper, orig_ins_len) =
-        hook_wrapper::<H, T>(Some(func as *const u8), target, exec_heap, preserve_regs);
-    PatchType::BasicHook(func - base, wrapper, orig_ins_len)
+    let func = H::address(base) as *const u8;
+    let orig = match preserve_regs {
+        false => OrigFuncCallback::Overwritten(func),
+        true => OrigFuncCallback::Hook(func),
+    };
+    let target_objects = {
+        let data = H::write_target_objects(target);
+        // Memory leak, but the code cannot be freed currently either so oh well.
+        (*Box::into_raw(data)).as_ptr()
+    };
+    let (wrapper, orig_ins_len) = H::wrapper_assembler(target_objects)
+        .generate_wrapper_code(orig)
+        .write_wrapper(Some(func), exec_heap, None);
+    PatchType::BasicHook(func as usize - base, wrapper as usize, orig_ins_len)
 }
 
-pub unsafe fn import_hook<H: ExportHookClosure<T>, T>(base_addr: usize,
-                                func_dll: &[u8],
-                                func: Export,
-                                target: T,
-                                exec_heap: &mut ExecutableHeap
-                               ) -> Option<PatchType>
+pub unsafe fn import_addr(module: HMODULE, func_dll: &[u8], func: &Export) -> Option<*mut usize>
 {
     let func_dll_with_extension = {
         let has_extension = {
@@ -231,17 +231,13 @@ pub unsafe fn import_hook<H: ExportHookClosure<T>, T>(base_addr: usize,
         }
     };
 
-    pe::import_ptr(base_addr, &func_dll_with_extension, func).map(|ptr| {
-        let orig = *ptr;
-        let wrapper_memory = H::write_wrapper(false, target, Some(orig as *mut u8), exec_heap).0;
-        PatchType::Import(ptr as usize - base_addr, orig, wrapper_memory as usize)
-    })
+    pe::import_ptr(module as usize, &func_dll_with_extension, func)
 }
 
 /// Patches the imports of module given by `get_patch()`
-pub fn apply_library_loading_hook(patcher: &Patcher, mut patch: AnyModulePatch) {
-    let patcher_clone = patcher.clone_ref();
-    patch.import_hook_closure(b"kernel32", hook::LoadLibraryA,
+pub fn apply_library_loading_hook(root: &Patcher, patcher: &mut AllModulesPatcher) {
+    let patcher_clone = root.clone_ref();
+    patcher.import_hook_closure(b"kernel32"[..].into(), hook::LoadLibraryA,
         move |filename, orig: &Fn(_) -> _| {
         let already_loaded = unsafe { kernel32::GetModuleHandleA(filename) } != ptr::null_mut();
         let result = orig(filename);
@@ -250,8 +246,8 @@ pub fn apply_library_loading_hook(patcher: &Patcher, mut patch: AnyModulePatch) 
         }
         result
     });
-    let patcher_clone = patcher.clone_ref();
-    patch.import_hook_closure(b"kernel32", hook::LoadLibraryExA,
+    let patcher_clone = root.clone_ref();
+    patcher.import_hook_closure(b"kernel32"[..].into(), hook::LoadLibraryExA,
         move |filename, file, flags, orig: &Fn(_, _, _) -> _| {
         let already_loaded = unsafe { kernel32::GetModuleHandleA(filename) } != ptr::null_mut();
         let result = orig(filename, file, flags);
@@ -260,8 +256,8 @@ pub fn apply_library_loading_hook(patcher: &Patcher, mut patch: AnyModulePatch) 
         }
         result
     });
-    let patcher_clone = patcher.clone_ref();
-    patch.import_hook_closure(b"kernel32", hook::LoadLibraryW,
+    let patcher_clone = root.clone_ref();
+    patcher.import_hook_closure(b"kernel32"[..].into(), hook::LoadLibraryW,
         move |filename, orig: &Fn(_) -> _| {
         let already_loaded = unsafe { kernel32::GetModuleHandleW(filename) } != ptr::null_mut();
         let result = orig(filename);
@@ -270,8 +266,8 @@ pub fn apply_library_loading_hook(patcher: &Patcher, mut patch: AnyModulePatch) 
         }
         result
     });
-    let patcher_clone = patcher.clone_ref();
-    patch.import_hook_closure(b"kernel32", hook::LoadLibraryExW,
+    let patcher_clone = root.clone_ref();
+    patcher.import_hook_closure(b"kernel32"[..].into(), hook::LoadLibraryExW,
         move |filename, file, flags, orig: &Fn(_, _, _) -> _| {
         let already_loaded = unsafe { kernel32::GetModuleHandleW(filename) } != ptr::null_mut();
         let result = orig(filename, file, flags);
@@ -279,19 +275,28 @@ pub fn apply_library_loading_hook(patcher: &Patcher, mut patch: AnyModulePatch) 
             hook_new_library(result, &patcher_clone);
         }
         result
+    });
+    let patcher_clone = root.clone_ref();
+    patcher.import_hook_closure(b"kernel32"[..].into(), hook::FreeLibrary,
+        move |library, orig: &Fn(_) -> _| {
+        if let Some(filename) = module_name(library) {
+            let result = orig(library);
+            let unloaded = library_handle(&filename) == ptr::null_mut();
+            if unloaded {
+                let mut patcher = patcher_clone.lock().unwrap();
+                patcher.library_unloaded(library);
+            }
+            result
+        } else {
+            // Just swallow the error otherwise :/
+            orig(library)
+        }
     });
 }
 
 fn hook_new_library(lib: HMODULE, patcher: &Patcher) {
-    unsafe {
-        let mut patcher = patcher.lock().unwrap();
-        let lib_name = module_name(lib).unwrap();
-        patcher.patch_library(&lib_name, |mut patch| {
-            for &(ref apply_patches, ref patch_uid) in patch.automatic_library_patches {
-                apply_patches(patch.any_module_downgrade(**patch_uid));
-            }
-        });
-    }
+    let mut patcher = patcher.lock().unwrap();
+    patcher.library_loaded(lib);
 }
 
 /// Calls `callback` with names of each library loaded by current process.

@@ -13,7 +13,11 @@ unsafe fn read_at<Ty: Copy>(offset: usize) -> Ty {
 
 /// Gets pointer to the import table of an image which has been loaded to memory.
 /// Preconditions: `image_base` must be address of first byte of the image (MS-DOS header).
-pub unsafe fn import_ptr(image_base: usize, dll_name: &[u8], import: Export) -> Option<*mut usize> {
+pub unsafe fn import_ptr(image_base: usize,
+                         dll_name: &[u8],
+                         import: &Export
+                         ) -> Option<*mut usize>
+{
     import_table(image_base).and_then(|(imps, size, is_64)| {
         let mut pos = 0;
         while pos + 0x14 <= size {
@@ -46,7 +50,7 @@ pub unsafe fn import_ptr(image_base: usize, dll_name: &[u8], import: Export) -> 
             if val == 0 {
                 return None;
             }
-            match import {
+            match *import {
                 Export::Name(name) => {
                     if val & 0x80000000 == 0 {
                         let name_addr = image_base + val as usize + 2;
@@ -95,12 +99,12 @@ unsafe fn import_table(image_base: usize) -> Option<(usize, u32, bool)> {
 fn test_import_ptr() {
     unsafe {
         let addr = ::platform::exe_handle() as usize;
-        assert!(import_ptr(addr, b"kernel32.dll", Export::Name(b"GetProcAddress")).is_some());
-        assert!(import_ptr(addr, b"KERNEL32.dll", Export::Name(b"GetProcAddress")).is_some());
-        assert!(import_ptr(addr, b"kernel32.dll", Export::Name(b"HeapAlloc")).is_some());
-        assert!(import_ptr(addr, b"kernel32.dll", Export::Name(b"getprocaddress")).is_none());
-        assert!(import_ptr(addr, b"kernel32.dll", Export::Name(b"DoesNotExist")).is_none());
-        assert!(import_ptr(addr, b"user32.dll", Export::Name(b"VirtualAlloc")).is_none());
-        assert!(import_ptr(addr, b"zzzqqqwhatever", Export::Name(b"VirtualAlloc")).is_none());
+        assert!(import_ptr(addr, b"kernel32.dll", &Export::Name(b"GetProcAddress")).is_some());
+        assert!(import_ptr(addr, b"KERNEL32.dll", &Export::Name(b"GetProcAddress")).is_some());
+        assert!(import_ptr(addr, b"kernel32.dll", &Export::Name(b"HeapAlloc")).is_some());
+        assert!(import_ptr(addr, b"kernel32.dll", &Export::Name(b"getprocaddress")).is_none());
+        assert!(import_ptr(addr, b"kernel32.dll", &Export::Name(b"DoesNotExist")).is_none());
+        assert!(import_ptr(addr, b"user32.dll", &Export::Name(b"VirtualAlloc")).is_none());
+        assert!(import_ptr(addr, b"zzzqqqwhatever", &Export::Name(b"VirtualAlloc")).is_none());
     }
 }

@@ -34,22 +34,48 @@ pub mod platform;
 #[doc(hidden)]
 pub mod platform;
 
+mod patch_map;
+
 pub use macros::{AddressHook, AddressHookClosure, ExportHook, ExportHookClosure};
 
-use std::{ops, mem};
+use std::{mem, ops};
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
-use std::marker::PhantomData;
+use std::marker::{PhantomData, Sync};
 use std::path::Path;
 use std::sync::{Arc, MutexGuard, Mutex, Weak};
 
+use libc::c_void;
+
+use patch_map::PatchMap;
+
 struct PatchHistory {
     ty: platform::PatchType,
-    // Used if the patch was applied by `patch_modules`,
-    // so that all patches caused by one call can be removed.
-    // 0 otherwise.
-    // Also (currently) !0 means that it's an internal
-    // library loading hook.
-    all_modules_id: u32,
+}
+
+// Slightly skecthy as dropping without clearing prev_imports/hook_entry first will leak memory,
+// unless the owning Patcher is cleared as well, as that'll free everything from the exec heap.
+struct AllModulesImport {
+    library: Cow<'static, [u8]>,
+    export: Export<'static>,
+    wrapper_code: ::platform::HookWrapCode,
+    // This keeps the hook target alive as long as the hook exists.
+    #[allow(dead_code)]
+    wrapper_target: Box<[u8]>,
+    enabled: bool,
+    // module, orig_entry, hook_entry (fixed up for this orig_entry)
+    prev_imports: Vec<(platform::LibraryHandle, *mut c_void, *mut c_void)>,
+}
+
+#[derive(Clone, Copy)]
+pub enum OrigFuncCallback {
+    None,
+    // Just gives a way to call the original function.
+    Overwritten(*const u8),
+    // Calls original function afterwards.
+    Hook(*const u8),
+    // For import hooks, allows setting the value once the library is actually loaded.
+    ImportHook,
 }
 
 /// A 'handle' to a patch. Allows disabling/re-enabling it at will.
@@ -57,13 +83,71 @@ struct PatchHistory {
 /// of memory that may have been allocated for the patch to work.
 ///
 /// Note that the patch handle is not unique, and the user needs to
-/// keep track of `PatchManager` that had actually created the patch
+/// keep track of `Patcher` that had actually created the patch
 /// in order to use it.
 pub struct Patch(PatchEnum);
 
 enum PatchEnum {
     Single(Weak<PatchHistory>),
-    AllModules(Weak<u32>),
+    AllModulesImport(patch_map::Key),
+    Group(Vec<PatchEnum>),
+}
+
+impl AllModulesImport {
+    fn apply_new(&mut self,
+                 module: platform::LibraryHandle,
+                 heap: &mut platform::ExecutableHeap) {
+        unsafe {
+            let addr = platform::import_addr(module, &self.library, &self.export);
+            if let Some(addr) = addr {
+                let orig = *addr;
+                let (hook_entry, _) = self.wrapper_code.write_wrapper(None,
+                                                                      heap,
+                                                                      Some(orig as *const u8));
+                self.prev_imports.push((module, orig as *mut c_void, hook_entry as *mut c_void));
+                if self.enabled {
+                    *addr = hook_entry as usize;
+                }
+            }
+        }
+    }
+
+    fn library_unloaded(&mut self,
+                        library: platform::LibraryHandle,
+                        heap: &mut platform::ExecutableHeap) {
+        for &(_, _, hook_entry) in self.prev_imports.iter().filter(|&&(m, _, _)| m == library) {
+            heap.free(hook_entry as *mut u8);
+        }
+        self.prev_imports.retain(|&(m, _, _)| m != library);
+    }
+
+    fn enable(&mut self) {
+        if !self.enabled {
+            for &(lib, _, hook) in &self.prev_imports {
+                unsafe {
+                    match platform::import_addr(lib, &self.library, &self.export) {
+                        Some(addr) => *addr = hook as usize,
+                        None => panic!("Could not enable import hook"),
+                    }
+                }
+            }
+            self.enabled = true;
+        }
+    }
+
+    fn disable(&mut self) {
+        if self.enabled {
+            for &(lib, orig, _) in &self.prev_imports {
+                unsafe {
+                    match platform::import_addr(lib, &self.library, &self.export) {
+                        Some(addr) => *addr = orig as usize,
+                        None => panic!("Could not disable import hook"),
+                    }
+                }
+            }
+            self.enabled = false;
+        }
+    }
 }
 
 /// The main patching structure.
@@ -91,9 +175,22 @@ struct PatcherState {
     patches: Vec<(Option<OsString>, Vec<Arc<PatchHistory>>)>,
     disabled_patches: Vec<(Option<OsString>, Vec<Arc<PatchHistory>>)>,
     exec_heap: platform::ExecutableHeap,
-    library_load_hooks: Vec<Arc<PatchHistory>>,
-    automatic_library_patches: Vec<(Box<Fn(AnyModulePatch)>, Arc<u32>)>,
-    next_all_modules_id: u32,
+    sys_patch_count: u32,
+    all_module_patches: PatchMap<AllModulesImport>,
+}
+
+/// Allows applying patches that modify all currently loaded modules, and ones that will be
+/// loaded later.
+///
+/// Currently those patches are only import hooks.
+///
+/// Any patches created `AllModulesPatcher` will be enabled once `apply()` is called. If it is
+/// skipped, the destructor will enable patches anyways, but `apply()` allows submitting them
+/// while disabled, and gives a `Patch` handle for enabling/disabling them all at once.
+#[must_use]
+pub struct AllModulesPatcher<'a: 'b, 'b> {
+    parent: &'b mut ActivePatcher<'a>,
+    patches: Vec<(AllModulesImport, patch_map::Key)>,
 }
 
 impl Patcher {
@@ -133,9 +230,8 @@ impl PatcherState {
             patches: Vec::new(),
             disabled_patches: Vec::new(),
             exec_heap: platform::ExecutableHeap::new(),
-            library_load_hooks: Vec::new(),
-            automatic_library_patches: Vec::new(),
-            next_all_modules_id: 1,
+            sys_patch_count: 0,
+            all_module_patches: PatchMap::new(),
         }
     }
 }
@@ -182,7 +278,6 @@ impl<'a> ActivePatcher<'a> {
         closure(ModulePatch {
             parent_patches: find_or_create_mod_patch_vec(&mut state.patches, None),
             exec_heap: &mut state.exec_heap,
-            automatic_library_patches: &state.automatic_library_patches,
             base: exe as usize,
         });
     }
@@ -208,7 +303,6 @@ impl<'a> ActivePatcher<'a> {
         closure(ModulePatch {
             parent_patches: find_or_create_mod_patch_vec(&mut state.patches, Some(lib.as_ref())),
             exec_heap: &mut state.exec_heap,
-            automatic_library_patches: &state.automatic_library_patches,
             base: lib_handle as usize,
         });
     }
@@ -222,53 +316,14 @@ impl<'a> ActivePatcher<'a> {
         });
     }
 
-    /// Applies patches of `closure` for the executable itself and all currently
-    /// loaded libraries, and hooks system's library loading, applying the patches
-    /// whenever a new library is loaded.
-    ///
-    /// Returns a patch that can be used to control both the library loading hook
-    /// and any hooks that have been applied in `closure`. (
-    pub fn patch_modules<P: Fn(AnyModulePatch) + 'static>(&mut self, closure: P) -> Patch {
-        fn make_patch<'a>(this: &'a mut PatcherState,
-                                 name: Option<&OsStr>,
-                                 addr: platform::LibraryHandle,
-                                 uid: u32
-                                ) -> AnyModulePatch<'a> {
-            AnyModulePatch {
-                parent_patches: find_or_create_mod_patch_vec(&mut this.patches, name),
-                base: addr as usize,
-                all_modules_id: uid,
-                exec_heap: &mut this.exec_heap,
-            }
-        }
 
-        // TODO: Allow applying *a lot* of patches to every module.
-        assert!(self.state.next_all_modules_id != u32::max_value());
-        let patch_uid = self.state.next_all_modules_id;
-        self.state.next_all_modules_id += 1;
-
-        let apply_library_patches = self.state.library_load_hooks.is_empty();
-        {
-            let exe = platform::exe_handle();
-            let _protection = platform::MemoryProtection::new(exe);
-            closure(make_patch(&mut *self.state, None, exe, patch_uid));
-            if apply_library_patches {
-                let patch = make_patch(&mut *self.state, None, exe, !0);
-                platform::apply_library_loading_hook(self.parent, patch);
-            }
+    /// Begin applying patches that affect every module of the process. See `AllModulesPatcher`
+    /// for more information.
+    pub fn patch_all_modules<'b>(&'b mut self) -> AllModulesPatcher<'a, 'b> {
+        AllModulesPatcher {
+            parent: self,
+            patches: Vec::new(),
         }
-        platform::for_libraries(|name, handle| {
-            let _protection = platform::MemoryProtection::new(handle);
-            closure(make_patch(&mut *self.state, Some(name), handle, patch_uid));
-            if apply_library_patches {
-                let patch = make_patch(&mut *self.state, Some(name), handle, !0);
-                platform::apply_library_loading_hook(self.parent, patch);
-            }
-        }).unwrap();
-        let arc = Arc::new(patch_uid);
-        let weak = Arc::downgrade(&arc);
-        self.state.automatic_library_patches.push((Box::new(closure), arc));
-        Patch(PatchEnum::AllModules(weak))
     }
 
     /// Hackish way to support weird calling conventions that some callbacks may require.
@@ -286,37 +341,177 @@ impl<'a> ActivePatcher<'a> {
     ///
     /// Use `repatch()` to reapply them.
     pub unsafe fn unpatch(&mut self) {
-        for &mut (ref module, ref mut patches) in self.state.patches.iter_mut() {
+        let state = &mut self.state;
+        for &mut (ref module, ref mut patches) in state.patches.iter_mut() {
             let (base, _protection) = unprotect_module(module);
             for patch in patches.iter_mut() {
                 patch.ty.disable(base);
             }
         }
-        let patches = mem::replace(&mut self.state.patches, Vec::new());
-        merge_patchvec(&mut self.state.disabled_patches, patches);
+        let patches = mem::replace(&mut state.patches, Vec::new());
+        merge_patchvec(&mut state.disabled_patches, patches);
+        for patch in state.all_module_patches.iter_mut() {
+            patch.disable();
+        }
     }
 
     /// Reapplies all patches that were previously removed with `unpatch()`.
     pub unsafe fn repatch(&mut self) {
-        for &mut (ref module, ref mut patches) in self.state.disabled_patches.iter_mut() {
+        let state = &mut self.state;
+        for &mut (ref module, ref mut patches) in state.disabled_patches.iter_mut() {
             let (base, _protection) = unprotect_module(module);
             for patch in patches.iter_mut() {
                 patch.ty.enable(base);
             }
         }
-        let patches = mem::replace(&mut self.state.disabled_patches, Vec::new());
-        merge_patchvec(&mut self.state.patches, patches);
+        let patches = mem::replace(&mut state.disabled_patches, Vec::new());
+        merge_patchvec(&mut state.patches, patches);
+        for patch in state.all_module_patches.iter_mut() {
+            patch.enable();
+        }
+    }
+
+    fn library_loaded(&mut self, library: platform::LibraryHandle) {
+        let state = &mut *self.state;
+        for patch in state.all_module_patches.iter_mut() {
+            patch.apply_new(library, &mut state.exec_heap);
+        }
+    }
+
+    fn library_unloaded(&mut self, library: platform::LibraryHandle) {
+        let state = &mut *self.state;
+        for patch in state.all_module_patches.iter_mut() {
+            patch.library_unloaded(library, &mut state.exec_heap);
+        }
     }
 }
 
-/// A patcher which can patch any module.
-///
-/// Allows only doing import/export hooks.
-pub struct AnyModulePatch<'a> {
-    parent_patches: &'a mut Vec<Arc<PatchHistory>>,
-    exec_heap: &'a mut platform::ExecutableHeap,
-    base: usize,
-    all_modules_id: u32,
+impl<'a: 'b, 'b> AllModulesPatcher<'a, 'b> {
+    /// Creates a `Patch` which hooks a function `hook`, exported by `library` by editing every
+    /// module's import table.
+    ///
+    /// This function doesn't require `library` to be loaded. As such, if the library doesn't
+    /// actually export `hook`, any errors will not be reported.
+    pub fn import_hook_closure<H, T>(&mut self,
+                                     library: Cow<'static, [u8]>,
+                                     _hook: H,
+                                     target: T
+                                    ) -> Patch
+    where H: ExportHookClosure<T>,
+    {
+        let wrapper_target = H::write_target_objects(target);
+        let patch = AllModulesImport {
+            library: library,
+            export: H::default_export(),
+            wrapper_code: H::wrapper_assembler(wrapper_target.as_ptr())
+                .generate_wrapper_code(OrigFuncCallback::ImportHook),
+            wrapper_target: wrapper_target,
+            enabled: false,
+            prev_imports: Vec::new(),
+        };
+        let key = self.parent.state.all_module_patches.alloc_slot();
+        self.patches.push((patch, key.clone()));
+        Patch(PatchEnum::AllModulesImport(key))
+    }
+
+    /// Same as `import_hook_closure`, but hooks to an `unsafe fn` which doesn't take
+    /// reference to the original function.
+    pub fn import_hook<H>(&mut self,
+                          library: Cow<'static, [u8]>,
+                          hook: H,
+                          target: H::Fnptr
+                          ) -> Patch
+    where H: ExportHook,
+    {
+        // `ExportHook::import` just calls `import_hook_closure()` with a short unsafe {}
+        // wrapper. It needs to be defined with a macro as the function signatures are different
+        // for each hook.
+        hook.import(self, library, target)
+    }
+
+
+    /// Same as `import_hook_closure`, but hooks to an `unsafe fn` which can also call the
+    /// original function.
+    pub fn import_hook_opt<H>(&mut self,
+                              library: Cow<'static, [u8]>,
+                              hook: H,
+                              target: H::OptFnptr
+                             ) -> Patch
+    where H: ExportHook,
+    {
+        hook.import_opt(self, library, target)
+    }
+
+    /// Applies and enables the patches which have been created using `AllModulesPatcher`.
+    ///
+    /// Returns a `Patch` which can be used to control all applied patches at once.
+    pub fn apply(mut self) -> Patch {
+        self.apply_system_patches();
+        // Have to do this as actually consuming is not allowed due to Drop impl
+        let patches = mem::replace(&mut self.patches, vec![]);
+        AllModulesPatcher::apply_patches(self.parent, patches, true)
+    }
+
+    /// Applies the patches which have been created using `AllModulesPatcher`, without enabling
+    /// them.
+    ///
+    /// Returns a `Patch` which can be used to control all applied patches at once.
+    pub fn apply_disabled(mut self) -> Patch {
+        self.apply_system_patches();
+        let patches = mem::replace(&mut self.patches, vec![]);
+        AllModulesPatcher::apply_patches(self.parent, patches, false)
+    }
+
+    fn apply_system_patches(&mut self) {
+        if self.parent.state.sys_patch_count == 0 {
+            platform::apply_library_loading_hook(self.parent.parent, self);
+        }
+        self.parent.state.sys_patch_count += 1;
+    }
+
+    fn apply_patches(parent: &mut ActivePatcher,
+                     mut patches: Vec<(AllModulesImport, patch_map::Key)>,
+                     enable: bool
+                    ) -> Patch
+    {
+        if enable {
+            for &mut (ref mut patch, _) in &mut patches {
+                patch.enable();
+            }
+        }
+        {
+            let exe = platform::exe_handle();
+            let _protection = platform::MemoryProtection::new(exe);
+            for &mut (ref mut patch, _) in &mut patches {
+                patch.apply_new(exe, &mut parent.state.exec_heap);
+            }
+        }
+        platform::for_libraries(|_, handle| {
+            let _protection = platform::MemoryProtection::new(handle);
+            for &mut (ref mut patch, _) in &mut patches {
+                patch.apply_new(handle, &mut parent.state.exec_heap);
+            }
+        }).unwrap();
+        let group = patches.iter()
+            .map(|&(_, ref key)| PatchEnum::AllModulesImport(key.clone()))
+            .collect();
+
+        for (patch, key) in patches {
+            parent.state.all_module_patches.assign(key, patch);
+        }
+        Patch(PatchEnum::Group(group))
+    }
+}
+
+impl<'a: 'b, 'b> Drop for AllModulesPatcher<'a, 'b> {
+    fn drop(&mut self) {
+        // Apply patches if they weren't applied
+        if !self.patches.is_empty() {
+            self.apply_system_patches();
+            let patches = mem::replace(&mut self.patches, vec![]);
+            AllModulesPatcher::apply_patches(self.parent, patches, true);
+        }
+    }
 }
 
 /// A patcher for a specific module.
@@ -324,13 +519,10 @@ pub struct AnyModulePatch<'a> {
 /// Allows module-specific operations which depend on base address, that is, hooking.
 ///
 /// Created by `Patcher::patch_exe()` and `Patcher::patch_library()`.
-///
-/// Can be cast to `AnyModulePatch` with `any_module_downgrade()`.
 pub struct ModulePatch<'a> {
     parent_patches: &'a mut Vec<Arc<PatchHistory>>,
     exec_heap: &'a mut platform::ExecutableHeap,
     /// Hackish solution for platform::hook_new_library
-    automatic_library_patches: &'a Vec<(Box<Fn(AnyModulePatch)>, Arc<u32>)>,
     base: usize,
 }
 
@@ -347,64 +539,6 @@ pub struct ModulePatchWithBase<'a> {
     expected_base: usize
 }
 
-impl<'a> AnyModulePatch<'a> {
-    /// Hooks current module's imported function by editing module's
-    /// import table.
-    ///
-    /// If the module doesn't import such function, `None` is returned.
-    ///
-    /// `target` can be acquired from casting a function pointer with
-    /// correct signature to `usize`. The caller must take care to
-    /// pass a hook with correct signature/calling convention.
-    pub fn import_hook_closure<H, T>(&mut self, dll: &[u8], _hook: H, target: T) -> Option<Patch>
-    where H: ExportHookClosure<T>,
-    {
-        let func = H::default_export();
-        match unsafe { platform::import_hook::<H, T>(self.base, dll, func, target, self.exec_heap) } {
-            Some(ty) => {
-                let patch = Arc::new(PatchHistory {
-                    ty: ty,
-                    all_modules_id: self.all_modules_id,
-                });
-                unsafe { patch.ty.enable(self.base); }
-                let weak = Arc::downgrade(&patch);
-                self.parent_patches.push(patch);
-                Some(Patch(PatchEnum::Single(weak)))
-            }
-            None => None,
-        }
-    }
-
-    /// Hooks current module's imported function by editing module's
-    /// import table.
-    ///
-    /// If the module doesn't import such function, `None` is returned.
-    ///
-    /// Hooks to an `unsafe fn`, which doesn't take reference to the original function.
-    /// For hooking with ability to call original function, use `import_hook_opt`,
-    /// For hooking to a safe function, use `import_hook_closure`.
-    pub fn import_hook<H>(&mut self, dll: &[u8], _hook: H, target: H::Fnptr) -> Option<Patch>
-    where H: ExportHook,
-    {
-        _hook.import(self, dll, target)
-    }
-
-
-    /// Hooks current module's imported function by editing module's
-    /// import table.
-    ///
-    /// If the module doesn't import such function, `None` is returned.
-    ///
-    /// Hooks to an `unsafe fn`, which takes reference to the original function.
-    /// For hooking without ability to call original function, use `import_hook`,
-    /// for hooking to a safe function, use `import_hook_closure`.
-    pub fn import_hook_opt<H>(&mut self, dll: &[u8], _hook: H, target: H::OptFnptr) -> Option<Patch>
-    where H: ExportHook,
-    {
-        _hook.import_opt(self, dll, target)
-    }
-}
-
 impl<'a> ModulePatch<'a> {
     /// Hooks a function, replacing it with `target`.
     pub unsafe fn hook_closure<H, T>(&mut self, _hook: H, target: T) -> Patch
@@ -418,7 +552,6 @@ impl<'a> ModulePatch<'a> {
         let ty = platform::jump_hook::<H, T>(self.base, target, self.exec_heap, preserve_regs);
         let patch = Arc::new(PatchHistory {
             ty: ty,
-            all_modules_id: 0,
         });
         patch.ty.enable(self.base);
         let weak = Arc::downgrade(&patch);
@@ -450,20 +583,6 @@ impl<'a> ModulePatch<'a> {
     where H: AddressHook,
     {
         _hook.call_hook(self, target)
-    }
-
-    fn any_module_downgrade(&mut self, all_modules_id: u32) -> AnyModulePatch {
-        AnyModulePatch {
-            parent_patches: self.parent_patches,
-            exec_heap: self.exec_heap,
-            base: self.base,
-            all_modules_id: all_modules_id
-        }
-    }
-
-    /// Creates an `AnyModulePatch` from `self`.
-    pub fn any_module_patch(&mut self) -> AnyModulePatch {
-        self.any_module_downgrade(0)
     }
 
     /// Retreives the current base address of the module.

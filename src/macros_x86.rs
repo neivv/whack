@@ -36,10 +36,16 @@ macro_rules! impl_addr_hook {
                 current_base.wrapping_sub($base).wrapping_add($addr)
             }
 
-            hook_wrapper_impl!(no, $stdcall, $name, $ret, $([$an @ $aloc($apos): $aty])*);
+            hook_wrapper_impl!($ret, $([$aty])*);
         }
 
-        impl_address_hook!($name, $ret, [$($aty),*], [$($an),*]);
+        impl $crate::AddressHook for $name {
+            fn wrapper_assembler(target: *const u8) -> $crate::platform::HookWrapAssembler {
+                $name::gen_wrap_private(target)
+            }
+
+            whack_addr_hook_common!($ret, [$($aty),*], [$($an),*]);
+        }
     };
 }
 
@@ -64,10 +70,16 @@ macro_rules! impl_import_hook {
                 }
             }
 
-            hook_wrapper_impl!(yes, true, $name, $ret, $([$an @ $aloc($apos): $aty])*);
+            hook_wrapper_impl!($ret, $([$aty])*);
         }
 
-        impl_export_hook!($name, $ret, [$($aty),*], [$($an),*]);
+        impl $crate::ExportHook for $name {
+            fn wrapper_assembler(target: *const u8) -> $crate::platform::HookWrapAssembler {
+                $name::gen_wrap_private(target)
+            }
+
+            whack_export_hook_common!($ret, [$($aty),*], [$($an),*]);
+        }
     }
 }
 
@@ -93,6 +105,15 @@ macro_rules! hook_impl_private {
             extern fn out_wrap($($an: $aty,)* orig: extern fn($($aty),*) -> $ret) -> $ret {
                 orig($($an),*)
             }
+
+            #[allow(unused_mut)]
+            fn gen_wrap_private(target: *const u8) -> $crate::platform::HookWrapAssembler {
+                let in_wrap_addr = $name::in_wrap as *const u8;
+                let mut wrapper =
+                    $crate::platform::HookWrapAssembler::new(in_wrap_addr, target, $stdcall);
+                hook_initialize_wrapper!(wrapper, [$($aloc, $apos),*]);
+                wrapper
+            }
         }
     }
 }
@@ -100,35 +121,23 @@ macro_rules! hook_impl_private {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! hook_wrapper_impl {
-    ($fnptr_hook:ident, $stdcall:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
-        #[allow(unused_mut)]
-        unsafe fn write_wrapper(preserve_regs: bool,
-                                target: T,
-                                orig_addr: Option<*const u8>,
-                                exec_heap: &mut $crate::platform::ExecutableHeap
-                                ) -> (*const u8, usize) {
-            let fnptr_hook = yes_no!($fnptr_hook);
-            let in_wrap_addr = $name::in_wrap as *const u8;
-            let orig = orig_addr.unwrap_or(::std::ptr::null());
-            let mut wrapper = $crate::platform::WrapAssembler::new(orig,
-                                                                   fnptr_hook,
-                                                                   $stdcall,
-                                                                   preserve_regs);
-            hook_initialize_wrapper!(wrapper, [$($aloc, $apos),*]);
-            let target_size = ::std::mem::size_of::<T>() +
-                ::std::mem::size_of::<*const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret>();
-            let result = wrapper.write(exec_heap, in_wrap_addr, target_size, |out| {
+    ($ret:ty, $([$aty:ty])*) => {
+        fn write_target_objects(target: T) -> Box<[u8]> {
+            unsafe {
                 let fat_ptr_size =
                     ::std::mem::size_of::<*const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret>();
-                let target_mem = out.offset(fat_ptr_size as isize) as *mut T;
+                let size = ::std::mem::size_of::<T>() + fat_ptr_size;
+                let out = vec![0u8; size].into_boxed_slice();
+
+                let target_mem = out.as_ptr().offset(fat_ptr_size as isize) as *mut T;
                 ::std::ptr::copy_nonoverlapping(&target, target_mem, 1);
                 ::std::mem::forget(target);
                 let target_ptr: *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret = target_mem;
-                let ptr_pos = out as *mut *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
+                let ptr_pos = out.as_ptr()
+                    as *mut *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
                 ::std::ptr::copy_nonoverlapping(&target_ptr, ptr_pos, 1);
-                ::std::mem::forget(target_ptr);
-            });
-            result
+                out
+            }
         }
     }
 }

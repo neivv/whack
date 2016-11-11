@@ -39,34 +39,33 @@ fn import_hooking() {
     }
 
     let value = Rc::new(AtomicUsize::new(0));
-    let patcher = Patcher::new();
+    let root_patcher = Patcher::new();
     {
-        let mut patcher = patcher.lock().unwrap();
+        let mut locked = root_patcher.lock().unwrap();
+        let mut patcher = locked.patch_all_modules();
         let copy = value.clone();
-        patcher.patch_modules(move |mut patch| {
-            let copy = copy.clone();
-            patch.import_hook_closure(b"kernel32", CreateFileW,
-                move |filename: *const u16, a, b, c, d, e, f, orig: &Fn(_, _, _, _, _, _, _) -> _| {
-                let prev = copy.fetch_add(1, Ordering::SeqCst);
-                let mut modified = vec![0; 1024];
-                let mut pos = 0;
-                unsafe {
-                    while *filename.offset(pos as isize) != 0 {
-                        modified[pos] = *filename.offset(pos as isize);
-                        pos += 1;
-                    }
+        patcher.import_hook_closure(b"kernel32"[..].into(), CreateFileW,
+            move |filename: *const u16, a, b, c, d, e, f, orig: &Fn(_, _, _, _, _, _, _) -> _| {
+            let prev = copy.fetch_add(1, Ordering::SeqCst);
+            let mut modified = vec![0; 1024];
+            let mut pos = 0;
+            unsafe {
+                while *filename.offset(pos as isize) != 0 {
+                    modified[pos] = *filename.offset(pos as isize);
+                    pos += 1;
                 }
-                modified[pos] = 0;
-                if prev == 0 {
-                    modified[pos - 1] = b'c' as u16;
-                    modified[pos - 2] = b'b' as u16;
-                    modified[pos - 3] = b'a' as u16;
-                }
-                orig(modified.as_ptr(), a, b, c, d, e, f)
-            });
-            patch.import_hook_opt(b"kernel32", CloseHandle, close_handle_log);
-            patch.import_hook(b"kernel32", GetProfileIntW, hook_without_orig);
+            }
+            modified[pos] = 0;
+            if prev == 0 {
+                modified[pos - 1] = b'c' as u16;
+                modified[pos - 2] = b'b' as u16;
+                modified[pos - 3] = b'a' as u16;
+            }
+            orig(modified.as_ptr(), a, b, c, d, e, f)
         });
+        patcher.import_hook_opt(b"kernel32"[..].into(), CloseHandle, close_handle_log);
+        patcher.import_hook(b"kernel32"[..].into(), GetProfileIntW, hook_without_orig);
+        patcher.apply();
     }
     unsafe {
         assert_eq!(value.load(Ordering::SeqCst), 0);
