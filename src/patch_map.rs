@@ -73,6 +73,20 @@ impl<Value> PatchMap<Value> {
     pub fn iter_mut(&mut self) -> IterMut<Value> {
         IterMut(self.active_entries.iter_mut())
     }
+
+    pub fn get(&self, key: &Key) -> Option<&Value> {
+        match self.active_entries[*key.0 as usize] {
+            Entry::Empty => None,
+            Entry::Occupied(_, ref val) => Some(val),
+        }
+    }
+
+    pub fn get_mut(&mut self, key: &Key) -> Option<&mut Value> {
+        match self.active_entries[*key.0 as usize] {
+            Entry::Empty => None,
+            Entry::Occupied(_, ref mut val) => Some(val),
+        }
+    }
 }
 
 impl<'a, T: 'a> Iterator for Iter<'a, T> {
@@ -122,5 +136,17 @@ mod test {
         let mut items = map.iter().cloned().collect::<Vec<_>>();
         items.sort();
         assert_eq!(items, vec![2, 7, 53, 97]);
+    }
+
+    #[test]
+    fn search() {
+        let mut map = PatchMap::<i32>::new();
+        map.insert(6);
+        let key = map.insert(52);
+        let key2 = map.insert(1);
+        map.insert(96);
+        assert_eq!(map.get(&key).cloned(), Some(52));
+        *map.get_mut(&key2).unwrap() += 2;
+        assert_eq!(map.get(&key2).cloned(), Some(3));
     }
 }

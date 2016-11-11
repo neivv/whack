@@ -46,6 +46,7 @@ use std::path::Path;
 use std::sync::{Arc, MutexGuard, Mutex, Weak};
 
 use libc::c_void;
+use smallvec::SmallVec;
 
 use patch_map::PatchMap;
 
@@ -55,6 +56,7 @@ struct PatchHistory {
 
 // Slightly skecthy as dropping without clearing prev_imports/hook_entry first will leak memory,
 // unless the owning Patcher is cleared as well, as that'll free everything from the exec heap.
+// Most operations require memory to be unprotected in advance.
 struct AllModulesImport {
     library: Cow<'static, [u8]>,
     export: Export<'static>,
@@ -335,6 +337,75 @@ impl<'a> ActivePatcher<'a> {
     where H: AddressHook,
     {
         unsafe { _hook.custom_calling_convention(target, &mut self.state.exec_heap) }
+    }
+
+    pub fn disable_patch(&mut self, patch: &Patch) {
+        let mut memprotect_guard = SmallVec::new();
+        self.unprotect_patch_memory(&patch.0, &mut memprotect_guard);
+        self.disable_patch_internal(&patch.0)
+    }
+
+    fn disable_patch_internal(&mut self, patch: &PatchEnum) {
+        match *patch {
+            PatchEnum::Single(_) => unimplemented!(),
+            PatchEnum::AllModulesImport(ref key) => {
+                if let Some(patch) = self.state.all_module_patches.get_mut(key) {
+                    patch.disable();
+                }
+            }
+            PatchEnum::Group(ref patches) => {
+                for patch in patches {
+                    self.disable_patch_internal(patch);
+                }
+            }
+        }
+    }
+
+    pub fn enable_patch(&mut self, patch: &Patch) {
+        let mut memprotect_guard = SmallVec::new();
+        self.unprotect_patch_memory(&patch.0, &mut memprotect_guard);
+        self.enable_patch_internal(&patch.0)
+    }
+
+    fn enable_patch_internal(&mut self, patch: &PatchEnum) {
+        match *patch {
+            PatchEnum::Single(_) => unimplemented!(),
+            PatchEnum::AllModulesImport(ref key) => {
+                if let Some(patch) = self.state.all_module_patches.get_mut(key) {
+                    patch.enable();
+                }
+            }
+            PatchEnum::Group(ref patches) => {
+                for patch in patches {
+                    self.enable_patch_internal(patch);
+                }
+            }
+        }
+    }
+
+    fn unprotect_patch_memory(&self,
+                              patch: &PatchEnum,
+                              protections: &mut SmallVec<[(platform::LibraryHandle,
+                                                           platform::MemoryProtection); 16]>)
+    {
+        match *patch {
+            PatchEnum::Single(_) => unimplemented!(),
+            PatchEnum::AllModulesImport(ref key) => {
+                if let Some(patch) = self.state.all_module_patches.get(key) {
+                    for &(handle, _, _) in &patch.prev_imports {
+                        if !protections.iter().any(|&(x, _)| x == handle) {
+                            let protection = platform::MemoryProtection::new(handle);
+                            protections.push((handle, protection));
+                        }
+                    }
+                }
+            }
+            PatchEnum::Group(ref patches) => {
+                for patch in patches {
+                    self.unprotect_patch_memory(patch, protections);
+                }
+            }
+        }
     }
 
     /// Unapplies all patches.

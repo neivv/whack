@@ -40,11 +40,12 @@ fn import_hooking() {
 
     let value = Rc::new(AtomicUsize::new(0));
     let root_patcher = Patcher::new();
+    let create_file_patch;
     {
         let mut locked = root_patcher.lock().unwrap();
         let mut patcher = locked.patch_all_modules();
         let copy = value.clone();
-        patcher.import_hook_closure(b"kernel32"[..].into(), CreateFileW,
+        create_file_patch = patcher.import_hook_closure(b"kernel32"[..].into(), CreateFileW,
             move |filename: *const u16, a, b, c, d, e, f, orig: &Fn(_, _, _, _, _, _, _) -> _| {
             let prev = copy.fetch_add(1, Ordering::SeqCst);
             let mut modified = vec![0; 1024];
@@ -69,14 +70,7 @@ fn import_hooking() {
     }
     unsafe {
         assert_eq!(value.load(Ordering::SeqCst), 0);
-        let result = kernel32::CreateFileW(winapi_str("file.dat").as_ptr(),
-                              winapi::GENERIC_READ | winapi::GENERIC_WRITE,
-                              winapi::FILE_SHARE_READ | winapi::FILE_SHARE_WRITE,
-                              null_mut(),
-                              winapi::CREATE_NEW,
-                              winapi::FILE_ATTRIBUTE_NORMAL,
-                              null_mut());
-        assert!(result != winapi::INVALID_HANDLE_VALUE);
+        let result = create_file("file.dat");
         assert_eq!(value.load(Ordering::SeqCst), 1);
         assert!(!std::path::Path::new("file.dat").exists());
         assert!(std::path::Path::new("file.abc").exists());
@@ -90,6 +84,42 @@ fn import_hooking() {
         assert_eq!(after, before + 1);
         std::fs::remove_file("file.abc").unwrap();
     }
+    {
+        let mut locked = root_patcher.lock().unwrap();
+        locked.disable_patch(&create_file_patch);
+    }
+    value.store(0, Ordering::SeqCst);
+    unsafe {
+        let result = create_file("file.dat");
+        assert!(std::path::Path::new("file.dat").exists());
+        assert!(!std::path::Path::new("file.abc").exists());
+        kernel32::CloseHandle(result);
+        std::fs::remove_file("file.dat").unwrap();
+    }
+    {
+        let mut locked = root_patcher.lock().unwrap();
+        locked.enable_patch(&create_file_patch);
+    }
+    value.store(0, Ordering::SeqCst);
+    unsafe {
+        let result = create_file("file.dat");
+        assert!(!std::path::Path::new("file.dat").exists());
+        assert!(std::path::Path::new("file.abc").exists());
+        kernel32::CloseHandle(result);
+        std::fs::remove_file("file.abc").unwrap();
+    }
+}
+
+unsafe fn create_file(path: &str) -> winapi::HANDLE {
+    let result = kernel32::CreateFileW(winapi_str(path).as_ptr(),
+                          winapi::GENERIC_READ | winapi::GENERIC_WRITE,
+                          winapi::FILE_SHARE_READ | winapi::FILE_SHARE_WRITE,
+                          null_mut(),
+                          winapi::CREATE_NEW,
+                          winapi::FILE_ATTRIBUTE_NORMAL,
+                          null_mut());
+    assert!(result != winapi::INVALID_HANDLE_VALUE);
+    result
 }
 
 fn winapi_str<T: AsRef<OsStr>>(input: T) -> Vec<u16> {
