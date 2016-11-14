@@ -7,7 +7,7 @@ use lde::{self, InsnSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use smallvec::SmallVec;
 
-use {ModulePatch, OrigFuncCallback};
+use OrigFuncCallback;
 pub use win_common::*;
 
 #[inline]
@@ -365,8 +365,8 @@ impl FuncAssembler {
         self.buf.write_fixups();
     }
 
-    pub fn write(&mut self, patch: &mut ModulePatch) -> *const u8 {
-        let data = patch.exec_heap.allocate(self.buf.len());
+    pub fn write(&mut self, exec_heap: &mut ExecutableHeap) -> *const u8 {
+        let data = exec_heap.allocate(self.buf.len());
         self.buf.write(data);
         data
     }

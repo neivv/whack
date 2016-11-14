@@ -32,8 +32,8 @@ macro_rules! impl_addr_hook {
         impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static>
             $crate::AddressHookClosure<T> for $name
         {
-            fn address(current_base: usize) -> usize {
-                current_base.wrapping_sub($base).wrapping_add($addr)
+            fn address() -> usize {
+                ($addr as usize).checked_sub($base).unwrap()
             }
 
             hook_wrapper_impl!($ret, $([$aty])*);

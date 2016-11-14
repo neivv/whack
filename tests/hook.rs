@@ -125,19 +125,18 @@ fn address_hooking() {
         let patcher = Patcher::new();
         {
             let mut patcher = patcher.lock().unwrap();
-            patcher.patch_library(dll_name(), move |mut patch| {
-                patch.hook_closure(hook::HookTest,
-                    move |a: u32, b: u32, c: u32, d: u32, e: u32, orig: &Fn(_, _, _, _, _) -> _| {
-                    orig(e, d, c, b, a)
-                });
-                patch.hook_closure(hook::HookReg,
-                    move |a: u32, b: u32, c: u32, orig: &Fn(_, _, _) -> _| {
-                    orig(c, b, a)
-                });
-                patch.hook_closure(hook::HookRegStack,
-                    move |a: u32, b: u32, c: u32, d: u32, e: u32, orig: &Fn(_, _, _, _, _) -> _| {
-                    orig(e, d, c, b, a)
-                });
+            let mut patch = patcher.patch_library(dll_name(), 0);
+            patch.hook_closure(hook::HookTest,
+                move |a: u32, b: u32, c: u32, d: u32, e: u32, orig: &Fn(_, _, _, _, _) -> _| {
+                orig(e, d, c, b, a)
+            });
+            patch.hook_closure(hook::HookReg,
+                move |a: u32, b: u32, c: u32, orig: &Fn(_, _, _) -> _| {
+                orig(c, b, a)
+            });
+            patch.hook_closure(hook::HookRegStack,
+                move |a: u32, b: u32, c: u32, d: u32, e: u32, orig: &Fn(_, _, _, _, _) -> _| {
+                orig(e, d, c, b, a)
             });
         }
 

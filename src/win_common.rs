@@ -14,46 +14,24 @@ use kernel32;
 use rust_win32error::Win32Error;
 use winapi::{self, HANDLE, HMODULE};
 
-use {AddressHookClosure, AllModulesPatcher, Export, OrigFuncCallback, Patcher};
+use {AllModulesPatcher, Export, Patcher};
 use pe;
 
-pub enum PatchType {
-    // Import addr (relative from base), original, hook
-    Import(usize, usize, usize),
-    // Addr (relative from base), wrapper, orig_size
-    // The orig code is stored at `wrapper - orig_size`.
-    BasicHook(usize, usize, usize),
-}
-
-impl PatchType {
-    pub unsafe fn enable(&self, base: usize) {
-        match *self {
-            PatchType::Import(offset, _, val) => {
-                let addr = (base + offset) as *mut usize;
-                *addr = val;
-            }
-            PatchType::BasicHook(offset, wrapper, _) => {
-                let addr = (base + offset) as *mut u8;
-                ::platform::write_jump(addr, wrapper as *const u8);
-            }
-        }
-    }
-
-    pub unsafe fn disable(&self, base: usize) {
-        match *self {
-            PatchType::Import(offset, val, _) => {
-                let addr = (base + offset) as *mut usize;
-                *addr = val;
-            }
-            PatchType::BasicHook(offset, wrapper, size) => {
-                let addr = (base + offset) as *mut u8;
-                ptr::copy_nonoverlapping((wrapper - size) as *const u8, addr, size);
-            }
-        }
-    }
-}
-
 pub type LibraryHandle = HMODULE;
+pub type LibraryName = Vec<u16>;
+
+pub fn library_name<T: AsRef<OsStr>>(input: T) -> LibraryName {
+    winapi_str(input)
+}
+
+pub fn library_name_to_handle(name: &LibraryName) -> Option<LibraryHandle> {
+    let result = unsafe { kernel32::GetModuleHandleW(name.as_ptr()) };
+    if result == ptr::null_mut() { None } else { Some(result) }
+}
+
+pub fn lib_handle_equals_name(handle: LibraryHandle, name: &LibraryName) -> bool {
+    unsafe { kernel32::GetModuleHandleW(name.as_ptr()) == handle }
+}
 
 mod hook {
     use winapi::{BOOL, HANDLE, HMODULE};
@@ -190,28 +168,6 @@ pub unsafe fn redirect_stderr(filename: &Path) -> bool {
     } else {
         false
     }
-}
-
-pub unsafe fn jump_hook<H: AddressHookClosure<T>, T>(base: usize,
-                                                     target: T,
-                                                     exec_heap: &mut ExecutableHeap,
-                                                     preserve_regs: bool,
-                                                    ) -> PatchType
-{
-    let func = H::address(base) as *const u8;
-    let orig = match preserve_regs {
-        false => OrigFuncCallback::Overwritten(func),
-        true => OrigFuncCallback::Hook(func),
-    };
-    let target_objects = {
-        let data = H::write_target_objects(target);
-        // Memory leak, but the code cannot be freed currently either so oh well.
-        (*Box::into_raw(data)).as_ptr()
-    };
-    let (wrapper, orig_ins_len) = H::wrapper_assembler(target_objects)
-        .generate_wrapper_code(orig)
-        .write_wrapper(Some(func), exec_heap, None);
-    PatchType::BasicHook(func as usize - base, wrapper as usize, orig_ins_len)
 }
 
 pub unsafe fn import_addr(module: HMODULE, func_dll: &[u8], func: &Export) -> Option<*mut usize>

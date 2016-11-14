@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use Patch;
 
 pub trait AddressHookClosure<Callback>: AddressHook {
-    fn address(base: usize) -> usize;
+    fn address() -> usize;
     /// Writes pointer to the closure object and the closure itself to memory, they obviously
     /// cannot be relocated afterwards. The boxed slice's beginning ptr is points to the
     /// closure pointer itself (It can be passed to HookWrapCode::write_wrapper).
@@ -13,9 +13,9 @@ pub trait AddressHookClosure<Callback>: AddressHook {
 pub trait AddressHook {
     type Fnptr;
     type OptFnptr;
-    unsafe fn hook<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::Fnptr) -> Patch;
-    unsafe fn hook_opt<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::OptFnptr) -> Patch;
-    unsafe fn call_hook<'a>(self, patch: &mut ::ModulePatch<'a>, val: Self::Fnptr) -> Patch;
+    unsafe fn hook(self, patch: &mut ::ModulePatcher, val: Self::Fnptr) -> Patch;
+    unsafe fn hook_opt(self, patch: &mut ::ModulePatcher, val: Self::OptFnptr) -> Patch;
+    unsafe fn call_hook(self, patch: &mut ::ModulePatcher, val: Self::Fnptr) -> Patch;
     unsafe fn custom_calling_convention<'a>(self,
                                             val: Self::Fnptr,
                                             exec_heap: &mut ::platform::ExecutableHeap,
@@ -101,23 +101,23 @@ macro_rules! whack_addr_hook_common {
     ($ret:ty, [$($aty:ty),*], [$($an:ident),*]) => {
         type Fnptr = unsafe fn($($aty),*) -> $ret;
         type OptFnptr = unsafe fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
-        unsafe fn hook<'a>(self, patch: &mut $crate::ModulePatch<'a>, val: Self::Fnptr) -> $crate::Patch
+        unsafe fn hook(self, patch: &mut $crate::ModulePatcher, val: Self::Fnptr) -> $crate::Patch
         {
             patch.hook_closure(self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
                 val($($an),*)
             })
         }
 
-        unsafe fn hook_opt<'a>(self, patch: &mut $crate::ModulePatch<'a>, val: Self::OptFnptr) -> $crate::Patch
+        unsafe fn hook_opt(self, patch: &mut $crate::ModulePatcher, val: Self::OptFnptr) -> $crate::Patch
         {
             patch.hook_closure(self, move |$($an,)* orig: &Fn($($aty),*) -> $ret| {
                 val($($an,)* orig)
             })
         }
 
-        unsafe fn call_hook<'a>(self, patch: &mut $crate::ModulePatch<'a>, val: Self::Fnptr) -> $crate::Patch
+        unsafe fn call_hook(self, patch: &mut $crate::ModulePatcher, val: Self::Fnptr) -> $crate::Patch
         {
-            patch.hook_closure_internal(true, self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
+            patch.call_hook_closure(self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
                 val($($an),*)
             })
         }
@@ -186,7 +186,7 @@ macro_rules! whack_export_hook_common {
 /// in form `address => name: type;`
 ///
 /// `init_fn` is a identifier of a function taking a
-/// [`&mut ModulePatch`](struct.ModulePatch.html), which must be called to initialize the
+/// [`&mut ModulePatcher`](struct.ModulePatcher.html), which must be called to initialize the
 /// addresses before they are used. This is necessary for handling situations when the module's
 /// base address differs from the one specified in `base_address`.
 ///
@@ -204,10 +204,9 @@ macro_rules! whack_export_hook_common {
 ///     let mut patcher = whack::Patcher::new();
 ///     {
 ///         let mut active_patcher = patcher.lock().unwrap();
+///         let mut patcher = active_patcher.patch_exe(0);
 ///         unsafe {
-///             active_patcher.patch_exe(|mut patch| {
-///                 init_vars(&mut patch);
-///             });
+///             init_vars(&mut patcher);
 ///         }
 ///     }
 ///
@@ -228,9 +227,12 @@ macro_rules! whack_vars {
             phantom: ::std::marker::PhantomData,
         };)*
         #[cold]
-        pub unsafe fn $init_fn(patch: &mut $crate::ModulePatch) {
-            let diff = patch.base() - $base;
-            $($name.address = $addr + diff;)*
+        pub unsafe fn $init_fn(patch: &mut $crate::ModulePatcher) {
+            unsafe fn init(base: usize, _heap: &mut $crate::platform::ExecutableHeap) {
+                let diff = base - $base;
+                $($name.address = $addr + diff;)*
+            }
+            patch.add_init_fn(init);
         }
     };
 }
@@ -254,7 +256,7 @@ macro_rules! whack_vars {
 /// is needed, it is specified with `whack_funcs!(stdcall, init_fn, base, ...);`.
 ///
 /// `init_fn` is a identifier of a function taking a
-/// [`&mut ModulePatch`](struct.ModulePatch.html), which must be called to initialize the
+/// [`&mut ModulePatcher`](struct.ModulePatcher.html), which must be called to initialize the
 /// functions before they are used. This is necessary for handling situations when the module's
 /// base address differs from the one specified in `base_address`.
 ///
@@ -283,10 +285,9 @@ macro_rules! whack_vars {
 ///     let mut patcher = whack::Patcher::new();
 ///     {
 ///         let mut active_patcher = patcher.lock().unwrap();
+///         let mut patcher = active_patcher.patch_exe(0);
 ///         unsafe {
-///             active_patcher.patch_exe(|mut patch| {
-///                 fun::init_funcs(&mut patch);
-///             });
+///             fun::init_funcs(&mut patcher);
 ///         }
 ///     }
 ///
@@ -303,23 +304,29 @@ macro_rules! whack_funcs {
     (stdcall, $init_fn:ident, $base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
         $(whack_fn!(pub $name($($args)*) $(-> $ret)*);)*
         #[cold]
-        pub unsafe fn $init_fn(patch: &mut $crate::ModulePatch) {
-            let diff = patch.base() - $base;
-            let mut buf = $crate::platform::FuncAssembler::new();
-            $(whack_fnwrap_write!(true, $addr as usize, buf, diff, [$($args)*]);)*
-            let funcs = buf.write(patch) as usize;
-            $(whack_fnwrap_finish!($name, buf, funcs);)*
+        pub unsafe fn $init_fn(patch: &mut $crate::ModulePatcher) {
+            unsafe fn init(base: usize, heap: &mut $crate::platform::ExecutableHeap) {
+                let diff = base - $base;
+                let mut buf = $crate::platform::FuncAssembler::new();
+                $(whack_fnwrap_write!(true, $addr as usize, buf, diff, [$($args)*]);)*
+                let funcs = buf.write(heap) as usize;
+                $(whack_fnwrap_finish!($name, buf, funcs);)*
+            }
+            patch.add_init_fn(init);
         }
     };
     ($init_fn:ident, $base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
         $(whack_fn!(pub $name($($args)*) $(-> $ret)*);)*
         #[cold]
-        pub unsafe fn $init_fn(patch: &mut $crate::ModulePatch) {
-            let diff = patch.base() - $base;
-            let mut buf = $crate::platform::FuncAssembler::new();
-            $(whack_fnwrap_write!(false, $addr as usize, buf, diff, [$($args)*]);)*
-            let funcs = buf.write(patch) as usize;
-            $(whack_fnwrap_finish!($name, buf, funcs);)*
+        pub unsafe fn $init_fn(patch: &mut $crate::ModulePatcher) {
+            unsafe fn init(base: usize, heap: &mut $crate::platform::ExecutableHeap) {
+                let diff = base - $base;
+                let mut buf = $crate::platform::FuncAssembler::new();
+                $(whack_fnwrap_write!(false, $addr as usize, buf, diff, [$($args)*]);)*
+                let funcs = buf.write(heap) as usize;
+                $(whack_fnwrap_finish!($name, buf, funcs);)*
+            }
+            patch.add_init_fn(init);
         }
     };
 }

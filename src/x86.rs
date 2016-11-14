@@ -7,7 +7,7 @@ use lde::{self, InsnSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use smallvec::SmallVec;
 
-use {ModulePatch, OrigFuncCallback};
+use OrigFuncCallback;
 pub use win_common::*;
 
 pub fn nop() -> u8 {
@@ -15,17 +15,9 @@ pub fn nop() -> u8 {
 }
 
 #[inline]
-pub unsafe fn write_call(from: *mut u8, to: *const u8) -> *mut u8 {
-    *from = 0xe8;
-    *(from.offset(1) as *mut usize) = (to as usize).wrapping_sub(from as usize).wrapping_sub(5);
-    from.offset(5)
-}
-
-#[inline]
-pub unsafe fn write_jump(from: *mut u8, to: *const u8) -> *mut u8 {
+pub unsafe fn write_jump(from: *mut u8, to: *const u8) {
     *from = 0xe9;
     *(from.offset(1) as *mut usize) = (to as usize).wrapping_sub(from as usize).wrapping_sub(5);
-    from.offset(5)
 }
 
 fn is_preserved_reg(reg: u8) -> bool {
@@ -285,8 +277,8 @@ impl FuncAssembler {
         self.buf.ret(0);
     }
 
-    pub fn write(&mut self, patch: &mut ModulePatch) -> *const u8 {
-        let data = patch.exec_heap.allocate(self.buf.len());
+    pub fn write(&mut self, exec_heap: &mut ExecutableHeap) -> *const u8 {
+        let data = exec_heap.allocate(self.buf.len());
         self.buf.write(data);
         data
     }

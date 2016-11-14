@@ -68,9 +68,9 @@ fn func_calls() {
         {
             let patcher = Patcher::new();
             let mut patcher = patcher.lock().unwrap();
-            patcher.patch_library(dll_name(), move |mut patch| {
-                funcs::init_funcs(&mut patch);
-            });
+            let mut patcher = patcher.patch_library(dll_name(), 0);
+            funcs::init_funcs(&mut patcher);
+            patcher.apply();
             call_funcs();
         }
     }
