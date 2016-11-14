@@ -1,6 +1,3 @@
-#![feature(link_args, asm)]
-#[link_args = "-static-libgcc"]
-extern {}
 extern crate byteorder;
 extern crate lde;
 extern crate libc;
