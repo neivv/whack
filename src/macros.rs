@@ -336,7 +336,7 @@ macro_rules! whack_funcs {
 macro_rules! whack_fnwrap_write {
     ($is_stdcall:expr, $addr:expr, $buf:expr, $diff:expr, [$($args:tt)*]) => {
         $buf.new_fnwrap();
-        whack_name_args!([fnwrap, $is_stdcall, $addr, $buf], [$([$args])*]);
+        whack_name_args!([fnwrap, $buf], [$([$args])*]);
         $buf.finish_fnwrap($addr.wrapping_add($diff), $is_stdcall);
     }
 }
@@ -375,18 +375,18 @@ macro_rules! whack_fndecl {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! whack_fnwrap_write_separated {
-    ($is_stdcall:expr, $addr:expr, $buf:expr, $([$argloc:ident ~ $argpos:expr])*) => {{
-        $(whack_fnwrap_write_arg!($is_stdcall, $addr, $buf, [$argloc ~ $argpos]);)*
+    ($buf:expr, $([$argloc:ident ~ $argpos:expr])*) => {{
+        $(whack_fnwrap_write_arg!($buf, [$argloc ~ $argpos]);)*
     }}
 }
 
 #[macro_export]
 #[doc(hidden)]
 macro_rules! whack_fnwrap_write_arg {
-    ($is_stdcall:expr, $addr:expr, $buf:expr, [stack ~ $apos:expr]) => {
+    ($buf:expr, [stack ~ $apos:expr]) => {
         $buf.stack($apos);
     };
-    ($is_stdcall:expr, $addr:expr, $buf:expr, [$aloc:ident ~ $apos:expr]) => {
+    ($buf:expr, [$aloc:ident ~ $apos:expr]) => {
         $buf.register(reg_id!($aloc));
     };
 }
@@ -396,24 +396,6 @@ macro_rules! whack_fnwrap_write_arg {
 macro_rules! maybe_pub_struct {
     (yes, $name:ident) => { pub struct $name; };
     (no, $name:ident) => { struct $name; };
-}
-
-#[macro_export]
-#[doc(hidden)]
-macro_rules! in_wrapper_ret_size {
-    ($pos:expr, $next:ty $(,$aty:ty)*) => {
-        in_wrapper_ret_size!($pos + 1 $(,$aty)*)
-    };
-    ($pos:expr) => {
-        if $pos == 0 { 1 } else { 3 }
-    };
-}
-
-#[macro_export]
-#[doc(hidden)]
-macro_rules! yes_no {
-    (yes) => { true };
-    (no) => { false };
 }
 
 /// Gives names to the argument types, and extracts their locations, if defined.
