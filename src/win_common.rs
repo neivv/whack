@@ -20,6 +20,10 @@ use pe;
 pub type LibraryHandle = HMODULE;
 pub type LibraryName = Vec<u16>;
 
+pub fn nop() -> u8 {
+    0x90
+}
+
 pub fn library_name<T: AsRef<OsStr>>(input: T) -> LibraryName {
     winapi_str(input)
 }

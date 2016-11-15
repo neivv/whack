@@ -86,7 +86,7 @@ fn import_hooking() {
     }
     {
         let mut locked = root_patcher.lock().unwrap();
-        locked.disable_patch(&create_file_patch);
+        unsafe { locked.disable_patch(&create_file_patch); }
     }
     value.store(0, Ordering::SeqCst);
     unsafe {
@@ -98,7 +98,7 @@ fn import_hooking() {
     }
     {
         let mut locked = root_patcher.lock().unwrap();
-        locked.enable_patch(&create_file_patch);
+        unsafe { locked.enable_patch(&create_file_patch); }
     }
     value.store(0, Ordering::SeqCst);
     unsafe {

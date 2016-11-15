@@ -37,7 +37,7 @@ type InitFn = unsafe fn(usize, &mut platform::ExecutableHeap);
 
 pub use macros::{AddressHook, AddressHookClosure, ExportHook, ExportHookClosure};
 
-use std::{mem, ops};
+use std::{mem, ops, ptr};
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::marker::{PhantomData, Sync};
@@ -64,19 +64,31 @@ struct AllModulesImport {
     prev_imports: Vec<(platform::LibraryHandle, *mut c_void, *mut c_void)>,
 }
 
-struct ModulePatch {
-    library: Option<Arc<platform::LibraryName>>,
-    // Relative from base address
-    address: usize,
+enum ModulePatchType {
+    Hook(HookPatch),
+    Data(SmallVec<[u8; 16]>, SmallVec<[u8; 16]>),
+}
+
+struct HookPatch {
     wrapper_code: platform::HookWrapAssembler,
     // This keeps the hook target alive as long as the hook exists.
     #[allow(dead_code)]
     wrapper_target: Box<[u8]>,
     wrapper: Option<*const u8>,
     orig_ins_len: usize,
-    enabled: bool,
     // Is this a replacing hook or just a detour
     replacing: bool,
+}
+
+struct ModulePatch {
+    variant: ModulePatchType,
+    library: Option<Arc<platform::LibraryName>>,
+    // Relative from base address
+    address: usize,
+    // Will the patch will get activated whenever the relevant module is loaded
+    enabled: bool,
+    // Is the patch is actually applied to a module (hooks have allocated their wrapper code)
+    active: bool,
 }
 
 fn library_name_to_handle_opt(val: &Option<Arc<platform::LibraryName>>)
@@ -170,61 +182,106 @@ impl AllModulesImport {
     }
 }
 
+impl HookPatch {
+    fn free_wrapper(&mut self, heap: &mut platform::ExecutableHeap) {
+        if let Some(wrapper) = self.wrapper {
+            // Beh, should have better system than this dumb orig_ins_len stuff.
+            unsafe { heap.free(wrapper.offset(0 - self.orig_ins_len as isize) as *mut u8); }
+            self.wrapper = None;
+        }
+    }
+
+    unsafe fn revert(&mut self, address: *mut u8, heap: &mut platform::ExecutableHeap) {
+        if let Some(wrapper) = self.wrapper {
+            let orig_ins = wrapper.offset(0 - self.orig_ins_len as isize);
+            std::ptr::copy_nonoverlapping(orig_ins, address, self.orig_ins_len);
+        }
+        self.free_wrapper(heap);
+    }
+}
+
 impl ModulePatch {
     // Assumes that library is the module patches need to be applied to
-    fn library_loaded(&mut self,
-                      library: platform::LibraryHandle,
-                      heap: &mut platform::ExecutableHeap) {
-        if self.wrapper.is_none() && self.enabled {
-            self.enable(library, heap);
+    unsafe fn library_loaded(&mut self,
+                             library: platform::LibraryHandle,
+                             heap: &mut platform::ExecutableHeap) {
+        if self.enabled && !self.active {
+            self.activate(library, heap);
         }
     }
 
     // Assumes that library is the module patches need to be applied to
     fn library_unloaded(&mut self, heap: &mut platform::ExecutableHeap) {
-        if let Some(wrapper) = self.wrapper {
-            // Beh, should have better system than this dump orig_ins_len stuff.
-            unsafe { heap.free(wrapper.offset(0 - self.orig_ins_len as isize) as *mut u8); }
-            self.wrapper = None;
+        match self.variant {
+            ModulePatchType::Hook(ref mut hook) => hook.free_wrapper(heap),
+            ModulePatchType::Data(_, _) => (),
         }
+        self.active = false;
     }
 
     // If the module wasn't currently loaded, this will make the patch to apply on load.
     fn mark_enabled(&mut self) {
-        self.enabled = true
+        self.enabled = true;
     }
 
-    fn enable(&mut self, handle: platform::LibraryHandle, heap: &mut platform::ExecutableHeap) {
-        if !self.enabled {
+    unsafe fn activate(&mut self,
+                       handle: platform::LibraryHandle,
+                       heap: &mut platform::ExecutableHeap) {
+        if !self.active {
             let address = (handle as usize + self.address) as *const u8;
-            let orig = match self.replacing {
-                true => OrigFuncCallback::Overwritten(address),
-                false => OrigFuncCallback::Hook(address),
-            };
-            let (wrapper, orig_ins_len) = self.wrapper_code.generate_wrapper_code(orig)
-                .write_wrapper(Some(address), heap, None);
-            unsafe { platform::write_jump(address as *mut u8, wrapper); }
-            self.wrapper = Some(wrapper);
-            self.orig_ins_len = orig_ins_len;
+            match self.variant {
+                ModulePatchType::Hook(ref mut hook) => {
+                    let orig = match hook.replacing {
+                        true => OrigFuncCallback::Overwritten(address),
+                        false => OrigFuncCallback::Hook(address),
+                    };
+                    let (wrapper, orig_ins_len) = hook.wrapper_code.generate_wrapper_code(orig)
+                        .write_wrapper(Some(address), heap, None);
+                    platform::write_jump(address as *mut u8, wrapper);
+                    hook.wrapper = Some(wrapper);
+                    hook.orig_ins_len = orig_ins_len;
+                }
+                ModulePatchType::Data(ref data, ref mut previous) => {
+                    ptr::copy_nonoverlapping(address, previous.as_mut_ptr(), data.len());
+                    ptr::copy_nonoverlapping(data.as_ptr(), address as *mut u8, data.len());
+                }
+            }
+            self.active = true;
+        }
+    }
+
+    unsafe fn enable(&mut self,
+                     handle: platform::LibraryHandle,
+                     heap: &mut platform::ExecutableHeap) {
+        if !self.enabled {
+            self.activate(handle, heap);
             self.enabled = true;
         }
     }
 
-    fn disable(&mut self,
-               handle: Option<platform::LibraryHandle>,
-               heap: &mut platform::ExecutableHeap) {
-        if let Some(wrapper) = self.wrapper {
+    unsafe fn disable(&mut self,
+                      handle: Option<platform::LibraryHandle>,
+                      heap: &mut platform::ExecutableHeap) {
+        if self.active {
             if let Some(handle) = handle {
                 let address = (handle as usize + self.address) as *mut u8;
-                unsafe {
-                    let orig_ins = wrapper.offset(0 - self.orig_ins_len as isize);
-                    std::ptr::copy_nonoverlapping(orig_ins, address, self.orig_ins_len);
+                match self.variant {
+                    ModulePatchType::Hook(ref mut hook) => {
+                        hook.revert(address, heap);
+                    }
+                    ModulePatchType::Data(_, ref previous) => {
+                        ptr::copy_nonoverlapping(previous.as_ptr(), address, previous.len());
+                    }
+                }
+            } else {
+                match self.variant {
+                    ModulePatchType::Hook(ref mut hook) => hook.free_wrapper(heap),
+                    ModulePatchType::Data(_, _) => (),
                 }
             }
-            unsafe { heap.free(wrapper.offset(0 - self.orig_ins_len as isize) as *mut u8); }
-            self.wrapper = None;
-            self.enabled = false;
+            self.active = false;
         }
+        self.enabled = false;
     }
 }
 
@@ -388,19 +445,20 @@ impl<'a> ActivePatcher<'a> {
     ///
     /// Returns a wrapper that accepts calling convetion specified by `_hook`, calling
     /// `target`. Only unsafe function pointers are accepted.
-    pub fn custom_calling_convention<H>(&mut self, _hook: H, target: H::Fnptr) -> *const u8
+    pub unsafe fn custom_calling_convention<H>(&mut self, _hook: H, target: H::Fnptr) -> *const u8
     where H: AddressHook,
     {
-        unsafe { _hook.custom_calling_convention(target, &mut self.state.exec_heap) }
+        _hook.custom_calling_convention(target, &mut self.state.exec_heap)
     }
 
-    pub fn disable_patch(&mut self, patch: &Patch) {
+    /// Disables a patch which has been created with this `Patcher`.
+    pub unsafe fn disable_patch(&mut self, patch: &Patch) {
         let mut memprotect_guard = SmallVec::new();
         self.unprotect_patch_memory(&patch.0, &mut memprotect_guard);
         self.disable_patch_internal(&patch.0)
     }
 
-    fn disable_patch_internal(&mut self, patch: &PatchEnum) {
+    unsafe fn disable_patch_internal(&mut self, patch: &PatchEnum) {
         match *patch {
             PatchEnum::Regular(ref key) => {
                 let state = &mut *self.state;
@@ -423,13 +481,13 @@ impl<'a> ActivePatcher<'a> {
         }
     }
 
-    pub fn enable_patch(&mut self, patch: &Patch) {
+    pub unsafe fn enable_patch(&mut self, patch: &Patch) {
         let mut memprotect_guard = SmallVec::new();
         self.unprotect_patch_memory(&patch.0, &mut memprotect_guard);
         self.enable_patch_internal(&patch.0)
     }
 
-    fn enable_patch_internal(&mut self, patch: &PatchEnum) {
+    unsafe fn enable_patch_internal(&mut self, patch: &PatchEnum) {
         match *patch {
             PatchEnum::Regular(ref key) => {
                 let state = &mut *self.state;
@@ -577,7 +635,7 @@ impl<'a> ActivePatcher<'a> {
                         }
                         for key in &group.patches {
                             if let Some(patch) = state.patches.get_mut(key) {
-                                patch.library_loaded(library, &mut state.exec_heap);
+                                unsafe { patch.library_loaded(library, &mut state.exec_heap); }
                             }
                         }
                         group.library_loaded = true;
@@ -637,7 +695,7 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     /// be specified as `|first, second, orig: &Fn(_, _) -> _|`.
     pub unsafe fn hook_closure<H, T>(&mut self, _hook: H, target: T) -> Patch
     where H: AddressHookClosure<T> {
-        self.add_patch::<H, T>(target, true)
+        self.add_hook::<H, T>(target, true)
     }
 
     /// Creates a hook from `hook` to closure `target`.
@@ -653,21 +711,24 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     /// be specified as `|first, second, orig: &Fn(_, _) -> _|`.
     pub unsafe fn call_hook_closure<H, T>(&mut self, _hook: H, target: T) -> Patch
     where H: AddressHookClosure<T> {
-        self.add_patch::<H, T>(target, false)
+        self.add_hook::<H, T>(target, false)
     }
 
-    fn add_patch<H, T>(&mut self, target: T, replacing: bool) -> Patch
+    fn add_hook<H, T>(&mut self, target: T, replacing: bool) -> Patch
     where H: AddressHookClosure<T> {
         let target = H::write_target_objects(target);
         let patch = ModulePatch {
+            variant: ModulePatchType::Hook(HookPatch {
+                wrapper_code: H::wrapper_assembler(target.as_ptr()),
+                wrapper_target: target,
+                wrapper: None,
+                orig_ins_len: 0,
+                replacing: replacing,
+            }),
             library: self.library.clone(),
             address: H::address(),
-            wrapper_code: H::wrapper_assembler(target.as_ptr()),
-            wrapper_target: target,
-            wrapper: None,
-            orig_ins_len: 0,
             enabled: false,
-            replacing: replacing,
+            active: false,
         };
         let key = self.parent.state.patches.alloc_slot();
         self.patches.push((patch, key.clone()));
@@ -736,7 +797,7 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
             if let Some(handle) = handle {
                 let _protection = platform::MemoryProtection::new(handle);
                 for &mut (ref mut patch, _) in &mut patches {
-                    patch.enable(handle, &mut parent.state.exec_heap);
+                    unsafe { patch.enable(handle, &mut parent.state.exec_heap); }
                 }
             } else {
                 for &mut (ref mut patch, _) in &mut patches {
@@ -773,6 +834,40 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     #[doc(hidden)]
     pub unsafe fn add_init_fn(&mut self, func: InitFn) {
         self.init_fns.push(func);
+    }
+
+    /// Writes `val` into `address`.
+    ///
+    /// Generally you'd use integer values, if there are other `repr(C)` types that can be safely
+    /// copied to memory, they can be used as well.
+    pub unsafe fn replace_val<T: Copy>(&mut self, address: usize, val: T) -> Patch {
+        use std::{mem, slice};
+        let slice = slice::from_raw_parts(&val as *const T as *const u8, mem::size_of::<T>());
+        self.replace(address, slice)
+    }
+
+    /// Replaces `length` bytes starting from `address` with nop instructions.
+    pub unsafe fn nop(&mut self, address: usize, length: usize) -> Patch {
+        use std::iter::repeat;
+        let nops: SmallVec<[u8; 16]> = repeat(platform::nop()).take(length).collect();
+        self.replace(address, &nops)
+    }
+
+    /// Writes bytes from `mem` into `address`.
+    pub unsafe fn replace(&mut self, address: usize, mem: &[u8]) -> Patch {
+        let patch = ModulePatch {
+            variant: {
+                let backup_buf = std::iter::repeat(0).take(mem.len()).collect();
+                ModulePatchType::Data(mem.iter().cloned().collect(), backup_buf)
+            },
+            library: self.library.clone(),
+            address: address - self.excepted_base,
+            enabled: false,
+            active: false,
+        };
+        let key = self.parent.state.patches.alloc_slot();
+        self.patches.push((patch, key.clone()));
+        Patch(PatchEnum::Regular(key))
     }
 }
 

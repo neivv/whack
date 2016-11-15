@@ -10,10 +10,6 @@ use smallvec::SmallVec;
 use OrigFuncCallback;
 pub use win_common::*;
 
-pub fn nop() -> u8 {
-    0x90
-}
-
 #[inline]
 pub unsafe fn write_jump(from: *mut u8, to: *const u8) {
     *from = 0xe9;
