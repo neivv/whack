@@ -61,7 +61,10 @@ fn func_calls() {
 
     unsafe {
         // Test that it works even if the dll is relocated.
-        kernel32::VirtualAlloc(funcs::BASE as winapi::LPVOID, 1, winapi::MEM_RESERVE, 0);
+        kernel32::VirtualAlloc(funcs::BASE as winapi::LPVOID,
+                               1,
+                               winapi::MEM_RESERVE,
+                               winapi::PAGE_NOACCESS);
         let lib = kernel32::LoadLibraryW(winapi_str(dll_path()).as_ptr());
         assert!(lib != null_mut());
 

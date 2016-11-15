@@ -86,7 +86,10 @@ fn dll_name() -> &'static str {
 fn address_hooking() {
     unsafe {
         // Test that it works even if the dll is relocated.
-        kernel32::VirtualAlloc(hook::BASE as winapi::LPVOID, 1, winapi::MEM_RESERVE, 0);
+        kernel32::VirtualAlloc(hook::BASE as winapi::LPVOID,
+                               1,
+                               winapi::MEM_RESERVE,
+                               winapi::PAGE_NOACCESS);
         let lib = kernel32::LoadLibraryW(winapi_str(dll_path()).as_ptr());
         assert!(lib != null_mut());
         let func = kernel32::GetProcAddress(lib, b"test_func\0".as_ptr() as *const i8);
