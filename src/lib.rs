@@ -445,6 +445,53 @@ impl<'a> ActivePatcher<'a> {
     ///
     /// Returns a wrapper that accepts calling convetion specified by `_hook`, calling
     /// `target`. Only unsafe function pointers are accepted.
+    ///
+    /// # Examples
+    /// ```rust
+    /// #[macro_use] extern crate whack;
+    /// extern crate libc;
+    ///
+    /// use libc::c_void;
+    ///
+    /// // Addresses aren't relevant here, there just isn't a specialized macro for
+    /// // `custom_calling_convention`.
+    /// # #[cfg(target_arch = "x86")]
+    /// declare_hooks!(0,
+    ///     0 => fastcall_4_args(@ecx u32, @edx u32, *const u8, *mut u8) -> u32;
+    /// );
+    ///
+    /// // Using thread_local! for simplicity, but `Patcher` internally uses thread-safe mutexes
+    /// // regardless.
+    /// thread_local!(static PATCHER: whack::Patcher = whack::Patcher::new());
+    ///
+    /// fn target(a1: u32, a2: u32, a3: *const u8, a4: *mut u8) -> u32 {
+    ///     unsafe {
+    ///         *a4 = *a3;
+    ///     }
+    ///     a1 + a2 * 2
+    /// }
+    ///
+    /// // A function taking two ints and a function pointer to fastcall.
+    /// unsafe fn ffi_function(a: u32, b: u32, c: *mut c_void) {
+    ///     // ...
+    /// }
+    ///
+    /// # #[cfg(target_arch = "x86")]
+    /// fn main() {
+    ///     let fastcall_ptr = PATCHER.with(|patcher| {
+    ///         let mut patcher = patcher.lock().unwrap();
+    ///         unsafe {
+    ///             patcher.custom_calling_convention(fastcall_4_args, target)
+    ///         }
+    ///     });
+    ///     unsafe {
+    ///         ffi_function(1, 2, fastcall_ptr as *mut c_void);
+    ///     }
+    /// }
+    ///
+    /// # #[cfg(not(target_arch = "x86"))]
+    /// # fn main() {}
+    /// ```
     pub unsafe fn custom_calling_convention<H>(&mut self, _hook: H, target: H::Fnptr) -> *const u8
     where H: AddressHook,
     {
@@ -481,6 +528,10 @@ impl<'a> ActivePatcher<'a> {
         }
     }
 
+    /// (Re-)Enables a patch which has been created with this `Patcher`.
+    ///
+    /// Generally, any patches that are created get enabled by default, unless a function such as
+    /// `ModulePatcher::apply_disabled` is used.
     pub unsafe fn enable_patch(&mut self, patch: &Patch) {
         let mut memprotect_guard = SmallVec::new();
         self.unprotect_patch_memory(&patch.0, &mut memprotect_guard);
