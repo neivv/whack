@@ -229,8 +229,8 @@ macro_rules! whack_vars {
         #[cold]
         pub unsafe fn $init_fn(patch: &mut $crate::ModulePatcher) {
             unsafe fn init(base: usize, _heap: &mut $crate::platform::ExecutableHeap) {
-                let diff = base - $base;
-                $($name.address = $addr + diff;)*
+                let diff = base.wrapping_sub($base as usize);
+                $($name.address = ($addr as usize).wrapping_add(diff);)*
             }
             patch.add_init_fn(init);
         }
@@ -306,7 +306,7 @@ macro_rules! whack_funcs {
         #[cold]
         pub unsafe fn $init_fn(patch: &mut $crate::ModulePatcher) {
             unsafe fn init(base: usize, heap: &mut $crate::platform::ExecutableHeap) {
-                let diff = base - $base;
+                let diff = base.wrapping_sub($base as usize);
                 let mut buf = $crate::platform::FuncAssembler::new();
                 $(whack_fnwrap_write!(true, $addr as usize, buf, diff, [$($args)*]);)*
                 let funcs = buf.write(heap) as usize;
@@ -320,7 +320,7 @@ macro_rules! whack_funcs {
         #[cold]
         pub unsafe fn $init_fn(patch: &mut $crate::ModulePatcher) {
             unsafe fn init(base: usize, heap: &mut $crate::platform::ExecutableHeap) {
-                let diff = base - $base;
+                let diff = base.wrapping_sub($base as usize);
                 let mut buf = $crate::platform::FuncAssembler::new();
                 $(whack_fnwrap_write!(false, $addr as usize, buf, diff, [$($args)*]);)*
                 let funcs = buf.write(heap) as usize;
