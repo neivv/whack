@@ -31,8 +31,6 @@ impl<Value> PatchMap<Value> {
         }
     }
 
-    // Allowing some dead code for now as the api would be odd otherwise.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn insert(&mut self, val: Value) -> Key {
         let key = self.new_key();
         self.active_entries[*key.0 as usize] = Entry::Occupied(key.clone(), val);
@@ -65,7 +63,6 @@ impl<Value> PatchMap<Value> {
         self.active_entries[index] = Entry::Occupied(key, val);
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn iter(&self) -> Iter<Value> {
         Iter(self.active_entries.iter())
     }

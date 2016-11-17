@@ -15,9 +15,11 @@ use whack::Patcher;
 export_hook!(pub extern "system" CreateFileW(*const u16, u32, u32, u32, u32, u32, u32) -> winapi::HANDLE);
 export_hook!(pub extern "system" CloseHandle(winapi::HANDLE) -> winapi::BOOL);
 export_hook!(pub extern "system" GetProfileIntW(*const u16, *const u16, u32) -> u32);
+export_hook!(pub extern "system" GetTickCount() -> u32);
 
 thread_local!(static CLOSE_HANDLE_COUNT: Cell<u32> = Cell::new(0));
 thread_local!(static GET_PROFILE_INT_COUNT: Cell<u32> = Cell::new(0));
+thread_local!(static TICK_COUNT_CALLS: Cell<u32> = Cell::new(0));
 
 unsafe fn close_handle_log(handle: winapi::HANDLE, orig: &Fn(winapi::HANDLE) -> winapi::BOOL) -> winapi::BOOL {
     CLOSE_HANDLE_COUNT.with(|x| x.set(x.get() + 1));
@@ -27,6 +29,15 @@ unsafe fn close_handle_log(handle: winapi::HANDLE, orig: &Fn(winapi::HANDLE) -> 
 unsafe fn hook_without_orig(_a: *const u16, _b: *const u16, _c: u32) -> u32 {
     GET_PROFILE_INT_COUNT.with(|x| x.set(x.get() + 1));
     0
+}
+
+
+fn add_tick_count_call() {
+    TICK_COUNT_CALLS.with(|x| x.set(x.get() + 1));
+}
+
+fn get_tick_count_calls() -> u32 {
+    TICK_COUNT_CALLS.with(|x| x.get())
 }
 
 #[test]
@@ -41,9 +52,19 @@ fn import_hooking() {
     let value = Rc::new(AtomicUsize::new(0));
     let root_patcher = Patcher::new();
     let create_file_patch;
+    let tick_count_patch;
     {
         let mut locked = root_patcher.lock().unwrap();
-        let mut patcher = locked.patch_all_modules();
+        {
+            let mut exe = locked.patch_exe(!0);
+            tick_count_patch = exe.import_hook_closure(b"kernel32"[..].into(), GetTickCount,
+                move |orig: &Fn() -> _| {
+                add_tick_count_call();
+                orig()
+            });
+            exe.apply_disabled();
+        }
+        let mut patcher = locked.patch_exe(!0);
         let copy = value.clone();
         create_file_patch = patcher.import_hook_closure(b"kernel32"[..].into(), CreateFileW,
             move |filename: *const u16, a, b, c, d, e, f, orig: &Fn(_, _, _, _, _, _, _) -> _| {
@@ -108,6 +129,15 @@ fn import_hooking() {
         kernel32::CloseHandle(result);
         std::fs::remove_file("file.abc").unwrap();
     }
+    unsafe { kernel32::GetTickCount(); }
+    assert_eq!(get_tick_count_calls(), 0);
+    {
+        let mut locked = root_patcher.lock().unwrap();
+        unsafe { locked.enable_patch(&tick_count_patch); }
+    }
+    let prev = get_tick_count_calls();
+    unsafe { kernel32::GetTickCount(); }
+    assert_eq!(get_tick_count_calls(), prev + 1);
 }
 
 unsafe fn create_file(path: &str) -> winapi::HANDLE {

@@ -14,7 +14,7 @@ use kernel32;
 use rust_win32error::Win32Error;
 use winapi::{self, HANDLE, HMODULE};
 
-use {AllModulesPatcher, Export, Patcher};
+use Export;
 use pe;
 
 pub type LibraryHandle = HMODULE;
@@ -35,15 +35,6 @@ pub fn library_name_to_handle(name: &LibraryName) -> Option<LibraryHandle> {
 
 pub fn lib_handle_equals_name(handle: LibraryHandle, name: &LibraryName) -> bool {
     unsafe { kernel32::GetModuleHandleW(name.as_ptr()) == handle }
-}
-
-mod hook {
-    use winapi::{BOOL, HANDLE, HMODULE};
-    export_hook!(pub extern "system" LoadLibraryA(*const i8) -> HMODULE);
-    export_hook!(pub extern "system" LoadLibraryExA(*const i8, HANDLE, u32) -> HMODULE);
-    export_hook!(pub extern "system" LoadLibraryW(*const u16) -> HMODULE);
-    export_hook!(pub extern "system" LoadLibraryExW(*const u16, HANDLE, u32) -> HMODULE);
-    export_hook!(pub extern "system" FreeLibrary(HMODULE) -> BOOL);
 }
 
 fn winapi_str<T: AsRef<OsStr>>(input: T) -> Vec<u16> {
@@ -81,32 +72,6 @@ impl ExecutableHeap {
 pub fn exe_handle() -> HMODULE {
     unsafe {
         kernel32::GetModuleHandleW(ptr::null())
-    }
-}
-
-fn module_name(handle: HMODULE) -> Option<OsString> {
-    unsafe {
-        let mut buf_size = 128;
-        let mut buf = Vec::with_capacity(buf_size);
-        loop {
-            let result = kernel32::GetModuleFileNameW(handle, buf.as_mut_ptr(), buf_size as u32);
-            match result {
-                n if n == buf_size as u32 => {
-                    // reserve does not guarantee to reserve exactly specified size,
-                    // unlike with_capacity
-                    let reserve_amt = buf.capacity();
-                    buf.reserve(reserve_amt);
-                    buf_size = buf.capacity();
-                }
-                0 => {
-                    // Error
-                    return None;
-                }
-                n => {
-                    return Some(OsString::from_wide(::std::slice::from_raw_parts(buf.as_ptr(), n as usize)));
-                }
-            }
-        }
     }
 }
 
@@ -192,71 +157,6 @@ pub unsafe fn import_addr(module: HMODULE, func_dll: &[u8], func: &Export) -> Op
     };
 
     pe::import_ptr(module as usize, &func_dll_with_extension, func)
-}
-
-/// Patches the imports of module given by `get_patch()`
-pub fn apply_library_loading_hook(root: &Patcher, patcher: &mut AllModulesPatcher) {
-    let patcher_clone = root.clone_ref();
-    patcher.import_hook_closure(b"kernel32"[..].into(), hook::LoadLibraryA,
-        move |filename, orig: &Fn(_) -> _| {
-        let already_loaded = unsafe { kernel32::GetModuleHandleA(filename) } != ptr::null_mut();
-        let result = orig(filename);
-        if !already_loaded {
-            hook_new_library(result, &patcher_clone);
-        }
-        result
-    });
-    let patcher_clone = root.clone_ref();
-    patcher.import_hook_closure(b"kernel32"[..].into(), hook::LoadLibraryExA,
-        move |filename, file, flags, orig: &Fn(_, _, _) -> _| {
-        let already_loaded = unsafe { kernel32::GetModuleHandleA(filename) } != ptr::null_mut();
-        let result = orig(filename, file, flags);
-        if !already_loaded {
-            hook_new_library(result, &patcher_clone);
-        }
-        result
-    });
-    let patcher_clone = root.clone_ref();
-    patcher.import_hook_closure(b"kernel32"[..].into(), hook::LoadLibraryW,
-        move |filename, orig: &Fn(_) -> _| {
-        let already_loaded = unsafe { kernel32::GetModuleHandleW(filename) } != ptr::null_mut();
-        let result = orig(filename);
-        if !already_loaded {
-            hook_new_library(result, &patcher_clone);
-        }
-        result
-    });
-    let patcher_clone = root.clone_ref();
-    patcher.import_hook_closure(b"kernel32"[..].into(), hook::LoadLibraryExW,
-        move |filename, file, flags, orig: &Fn(_, _, _) -> _| {
-        let already_loaded = unsafe { kernel32::GetModuleHandleW(filename) } != ptr::null_mut();
-        let result = orig(filename, file, flags);
-        if !already_loaded {
-            hook_new_library(result, &patcher_clone);
-        }
-        result
-    });
-    let patcher_clone = root.clone_ref();
-    patcher.import_hook_closure(b"kernel32"[..].into(), hook::FreeLibrary,
-        move |library, orig: &Fn(_) -> _| {
-        if let Some(filename) = module_name(library) {
-            let result = orig(library);
-            let unloaded = library_handle(&filename) == ptr::null_mut();
-            if unloaded {
-                let mut patcher = patcher_clone.lock().unwrap();
-                patcher.library_unloaded(library);
-            }
-            result
-        } else {
-            // Just swallow the error otherwise :/
-            orig(library)
-        }
-    });
-}
-
-fn hook_new_library(lib: HMODULE, patcher: &Patcher) {
-    let mut patcher = patcher.lock().unwrap();
-    patcher.library_loaded(lib);
 }
 
 /// Calls `callback` with names of each library loaded by current process.

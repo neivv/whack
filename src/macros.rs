@@ -35,12 +35,12 @@ pub trait ExportHook {
     type Fnptr;
     type OptFnptr;
     fn import(self,
-              patch: &mut ::AllModulesPatcher,
+              patch: &mut ::ModulePatcher,
               dll: Cow<'static, [u8]>,
               val: Self::Fnptr
               ) -> Patch;
     fn import_opt(self,
-                  patch: &mut ::AllModulesPatcher,
+                  patch: &mut ::ModulePatcher,
                   dll: Cow<'static, [u8]>,
                   val: Self::OptFnptr
                   ) -> Patch;
@@ -158,7 +158,7 @@ macro_rules! whack_export_hook_common {
         type Fnptr = unsafe fn($($aty),*) -> $ret;
         type OptFnptr = unsafe fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
         fn import(self,
-                  patch: &mut $crate::AllModulesPatcher,
+                  patch: &mut $crate::ModulePatcher,
                   lib: ::std::borrow::Cow<'static, [u8]>,
                   val: Self::Fnptr
                  ) -> $crate::Patch
@@ -168,7 +168,7 @@ macro_rules! whack_export_hook_common {
             })
         }
         fn import_opt(self,
-                      patch: &mut $crate::AllModulesPatcher,
+                      patch: &mut $crate::ModulePatcher,
                       lib: ::std::borrow::Cow<'static, [u8]>,
                       val: Self::OptFnptr
                      ) -> $crate::Patch
