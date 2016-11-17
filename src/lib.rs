@@ -387,10 +387,10 @@ impl<'a> ActivePatcher<'a> {
     /// # #[cfg(not(target_arch = "x86"))]
     /// # fn main() {}
     /// ```
-    pub unsafe fn custom_calling_convention<H>(&mut self, _hook: H, target: H::Fnptr) -> *const u8
+    pub fn custom_calling_convention<H>(&mut self, _hook: H, target: H::Fnptr) -> *const u8
     where H: AddressHook,
     {
-        _hook.custom_calling_convention(target, &mut self.state.exec_heap)
+        unsafe { _hook.custom_calling_convention(target, &mut self.state.exec_heap) }
     }
 
     /// Disables a patch which has been created with this `Patcher`.
@@ -563,17 +563,8 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
         self.add_hook::<H, T>(target, true)
     }
 
-    /// Creates a hook from `hook` to closure `target`.
-    ///
-    /// `target`'s signature has to be otherwise equivalent to what was specified in `hook`,
-    /// but it has an additional paremeter `&Fn()` that can be used to call the original
-    /// function.
-    ///
-    /// For example, if the hook is specified for `fn something(i32, *const u32) -> u32`,
-    /// `target` has to be
-    /// `fn target(first: i32, second: *const u32, orig: &Fn(i32, *const u32) -> u32) -> u32`.
-    /// If using the closure syntax, Rust cannot infer type for the original function, so it must
-    /// be specified as `|first, second, orig: &Fn(_, _) -> _|`.
+    // Not shown since calling `orig` is actually not allowed.
+    #[doc(hidden)]
     pub unsafe fn call_hook_closure<H, T>(&mut self, _hook: H, target: T) -> Patch
     where H: AddressHookClosure<T> {
         self.add_hook::<H, T>(target, false)
@@ -617,6 +608,16 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     where H: AddressHook,
     {
         _hook.hook_opt(self, target)
+    }
+
+    /// Creates a non-replacing hook.
+    ///
+    /// Unlike other hooks, this can be safely applied in middle of a function to inspect
+    /// its current state.
+    pub unsafe fn call_hook<H>(&mut self, _hook: H, target: H::Fnptr) -> Patch
+    where H: AddressHook,
+    {
+        _hook.call_hook(self, target)
     }
 
     /// Applies and enables the patches which have been created using this `ModulePatcher`.
