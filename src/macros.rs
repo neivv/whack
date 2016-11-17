@@ -47,6 +47,38 @@ pub trait ExportHook {
     fn wrapper_assembler(target: *const u8) -> ::platform::HookWrapAssembler;
 }
 
+/// Declares a library import hook.
+///
+/// Use one of the `ActivePatcher::import_hook` functions to apply the hook to a
+/// module's import table.
+///
+/// If the function is exported with a name, the hook's name must match the exported name.
+/// To hook by an ordinal, specify it before name in parentheses like this:
+///
+/// ```
+/// export_hook!(pub extern "system" (92) Function(u32) -> u32);
+/// ```
+///
+/// # Examples
+/// ```rust,no_run
+/// # #[macro_use] extern crate whack;
+/// # fn main() {}
+/// export_hook!(pub extern "system" IsDebuggerPresent() -> u32);
+///
+/// fn hide_debugger() {
+///     let mut patcher = whack::Patcher::new();
+///     {
+///         let mut active_patcher = patcher.lock().unwrap();
+///         // Calling IsDebuggerPresent from a library or with GetProcAddress will
+///         // still work though.
+///         let mut exe = active_patcher.patch_exe(!0);
+///         exe.import_hook_closure(b"kernel32"[..].into(), IsDebuggerPresent,
+///             |_orig: &Fn() -> _| { 0 });
+///     }
+///     // Note: Dropping `Patcher` is supposed to revert the patches,
+///     // though it doesn't currently work.
+/// }
+/// ```
 #[macro_export]
 macro_rules! export_hook {
     (pub extern "system" ($ord:expr) $name:ident($($aty:tt)*) -> $ret:ty) => {
@@ -204,7 +236,7 @@ macro_rules! whack_export_hook_common {
 ///     let mut patcher = whack::Patcher::new();
 ///     {
 ///         let mut active_patcher = patcher.lock().unwrap();
-///         let mut patcher = active_patcher.patch_exe(0);
+///         let mut patcher = active_patcher.patch_exe(!0);
 ///         unsafe {
 ///             init_vars(&mut patcher);
 ///         }

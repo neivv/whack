@@ -98,6 +98,7 @@ fn library_name_to_handle_opt(val: &Option<Arc<platform::LibraryName>>)
     }
 }
 
+#[doc(hidden)]
 #[derive(Clone, Copy)]
 pub enum OrigFuncCallback {
     None,
@@ -598,7 +599,7 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
         Patch(PatchEnum::Regular(key))
     }
 
-    /// Creates a hook from `hook` to closure `target`.
+    /// Creates a hook from `hook` to `target`.
     ///
     /// The original function will not be called afterwards. To apply a non-modifying hook, use
     /// `hook_closure()`, `call_hook()` or `hook_opt()`.
@@ -778,8 +779,8 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
 }
 
 impl<'a: 'b, 'b> Drop for ModulePatcher<'a, 'b> {
+    /// Applies patches with `apply()` if they weren't explicitly applied.
     fn drop(&mut self) {
-        // Apply patches if they weren't applied
         if !self.patches.is_empty() {
             let patches = mem::replace(&mut self.patches, vec![]);
             let library = mem::replace(&mut self.library, None);
@@ -790,25 +791,10 @@ impl<'a: 'b, 'b> Drop for ModulePatcher<'a, 'b> {
 }
 
 /// An exported function, identified either by its name or ordinal.
+#[doc(hidden)]
 pub enum Export<'a> {
     Name(&'a [u8]),
     Ordinal(u16),
-}
-
-pub trait ToPointer {
-    fn ptr(&self) -> *mut u8;
-}
-
-impl ToPointer for usize {
-    fn ptr(&self) -> *mut u8 {
-        *self as *mut u8
-    }
-}
-
-impl<T> ToPointer for *mut T {
-    fn ptr(&self) -> *mut u8 {
-        *self as *mut u8
-    }
 }
 
 /// Redirects stderr to a file.
@@ -816,6 +802,8 @@ pub unsafe fn redirect_stderr<F: AsRef<Path>>(filename: F) -> bool {
     platform::redirect_stderr(filename.as_ref())
 }
 
+/// Created with `whack_vars!` macrow.
+#[doc(hidden)]
 pub struct Variable<T> {
     pub address: usize,
     pub phantom: PhantomData<T>,
