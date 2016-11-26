@@ -12,10 +12,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use whack::Patcher;
 
-export_hook!(pub extern "system" CreateFileW(*const u16, u32, u32, u32, u32, u32, u32) -> winapi::HANDLE);
-export_hook!(pub extern "system" CloseHandle(winapi::HANDLE) -> winapi::BOOL);
-export_hook!(pub extern "system" GetProfileIntW(*const u16, *const u16, u32) -> u32);
-export_hook!(pub extern "system" GetTickCount() -> u32);
+whack_export!(pub extern "system" CreateFileW(*const u16, u32, u32, u32, u32, u32, u32) -> winapi::HANDLE);
+whack_export!(pub extern "system" CloseHandle(winapi::HANDLE) -> winapi::BOOL);
+whack_export!(pub extern "system" GetProfileIntW(*const u16, *const u16, u32) -> u32);
+whack_export!(pub extern "system" GetTickCount() -> u32);
 
 thread_local!(static CLOSE_HANDLE_COUNT: Cell<u32> = Cell::new(0));
 thread_local!(static GET_PROFILE_INT_COUNT: Cell<u32> = Cell::new(0));

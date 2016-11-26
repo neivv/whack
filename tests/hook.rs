@@ -11,7 +11,7 @@ use whack::Patcher;
 #[cfg(target_arch = "x86")]
 mod hook {
     pub const BASE: usize = 0x68100000;
-    declare_hooks!(0x68100000,
+    whack_hooks!(0x68100000,
         0x68101610 => HookTest(u32, u32, u32, u32, u32) -> u32;
         0x681015D4 => HookReg(@eax u32, @ecx u32, @esi u32) -> u32;
         0x681015FA => HookRegStack(@eax u32, @ecx u32, @edx u32, u32, @esi u32) -> u32;
@@ -21,7 +21,7 @@ mod hook {
 #[cfg(target_arch = "x86_64")]
 mod hook {
     pub const BASE: usize = 0x6C340000;
-    declare_hooks!(0x6C340000,
+    whack_hooks!(0x6C340000,
         0x6C3414F0 => HookTest(u32, u32, u32, u32, u32) -> u32;
         0x6C3414A5 => HookReg(@rbx u32, @rdi u32, @rsi u32) -> u32;
         0x6C3414C7 => HookRegStack(@rbx u32, @rdi u32, @r15 u32, u32, @rsi u32) -> u32;
@@ -30,7 +30,7 @@ mod hook {
 
 #[allow(dead_code)]
 mod hook_decl_tests {
-    declare_hooks!(0x1234,
+    whack_hooks!(0x1234,
         0x1233 => Empty();
         0x1233 => EmptyRetInt() -> u32;
         0x1233 => NoRet(u32);
@@ -43,7 +43,7 @@ mod hook_decl_tests {
 #[cfg(target_arch = "x86")]
 #[allow(dead_code)]
 mod hook_decl_tests_loc {
-    declare_hooks!(0x1234,
+    whack_hooks!(0x1234,
         0x1233 => NoRet(@ecx u32);
         0x2514 => Implicit(u32, @edi u32);
         0x2514 => Implicit2(@esi u32, u32);
@@ -54,7 +54,7 @@ mod hook_decl_tests_loc {
 #[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 mod hook_decl_tests_loc {
-    declare_hooks!(0x1234,
+    whack_hooks!(0x1234,
         0x1233 => NoRet(@rcx u32);
         0x2514 => Implicit(u32, @rdi u32);
         0x2514 => Implicit2(@rsi u32, u32);

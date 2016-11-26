@@ -351,7 +351,7 @@ impl<'a> ActivePatcher<'a> {
     /// // Addresses aren't relevant here, there just isn't a specialized macro for
     /// // `custom_calling_convention`.
     /// # #[cfg(target_arch = "x86")]
-    /// declare_hooks!(0,
+    /// whack_hooks!(0,
     ///     0 => fastcall_4_args(@ecx u32, @edx u32, *const u8, *mut u8) -> u32;
     /// );
     ///

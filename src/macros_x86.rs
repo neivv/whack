@@ -1,6 +1,6 @@
 #[macro_export]
 #[doc(hidden)]
-macro_rules! reg_id {
+macro_rules! whack_reg_id {
     (eax) => { 0 };
     (ecx) => { 1 };
     (edx) => { 2 };
@@ -13,22 +13,22 @@ macro_rules! reg_id {
 
 #[macro_export]
 #[doc(hidden)]
-macro_rules! impl_addr_hook {
+macro_rules! whack_impl_addr_hook {
     ($is_pub:ident, stdcall, $base:expr, $addr:expr, $name:ident, $ret:ty,
         $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) =>
     {
-        impl_addr_hook!(true, $is_pub, $base, $addr, $name, $ret, $([$an @ $aloc($apos): $aty])*);
+        whack_impl_addr_hook!(true, $is_pub, $base, $addr, $name, $ret, $([$an @ $aloc($apos): $aty])*);
     };
     ($is_pub:ident, cdecl, $base:expr, $addr:expr, $name:ident, $ret:ty,
         $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) =>
     {
-        impl_addr_hook!(false, $is_pub, $base, $addr, $name, $ret, $([$an @ $aloc($apos): $aty])*);
+        whack_impl_addr_hook!(false, $is_pub, $base, $addr, $name, $ret, $([$an @ $aloc($apos): $aty])*);
     };
     ($stdcall:expr, $is_pub:ident, $base:expr, $addr:expr, $name:ident, $ret:ty,
         $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) =>
     {
-        maybe_pub_struct!($is_pub, $name);
-        hook_impl_private!(no, $stdcall, $name, $ret, $([$an @ $aloc($apos): $aty])*);
+        whack_maybe_pub_struct!($is_pub, $name);
+        whack_hook_impl_private!(no, $stdcall, $name, $ret, $([$an @ $aloc($apos): $aty])*);
         impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static>
             $crate::AddressHookClosure<T> for $name
         {
@@ -36,7 +36,7 @@ macro_rules! impl_addr_hook {
                 ($addr as usize).checked_sub($base).unwrap()
             }
 
-            hook_wrapper_impl!($ret, $([$aty])*);
+            whack_hook_wrapper_impl!($ret, $([$aty])*);
         }
 
         impl $crate::AddressHook for $name {
@@ -51,15 +51,15 @@ macro_rules! impl_addr_hook {
 
 #[macro_export]
 #[doc(hidden)]
-macro_rules! impl_import_hook {
+macro_rules! whack_impl_import_hook {
     ($is_pub:ident, system, $ord:expr, $name:ident, $ret:ty,
      $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
-        impl_import_hook!($is_pub, stdcall, $ord, $name, $ret, $([$an @ $aloc($apos): $aty])*);
+        whack_impl_import_hook!($is_pub, stdcall, $ord, $name, $ret, $([$an @ $aloc($apos): $aty])*);
     };
     ($is_pub:ident, stdcall, $ord:expr, $name:ident, $ret:ty,
      $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
-        maybe_pub_struct!($is_pub, $name);
-        hook_impl_private!(yes, true, $name, $ret, $([$an @ $aloc($apos): $aty])*);
+        whack_maybe_pub_struct!($is_pub, $name);
+        whack_hook_impl_private!(yes, true, $name, $ret, $([$an @ $aloc($apos): $aty])*);
         impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::ExportHookClosure<T> for $name {
             fn default_export() -> $crate::Export<'static> {
                 if $ord as i32 == -1 {
@@ -70,7 +70,7 @@ macro_rules! impl_import_hook {
                 }
             }
 
-            hook_wrapper_impl!($ret, $([$aty])*);
+            whack_hook_wrapper_impl!($ret, $([$aty])*);
         }
 
         impl $crate::ExportHook for $name {
@@ -85,7 +85,7 @@ macro_rules! impl_import_hook {
 
 #[macro_export]
 #[doc(hidden)]
-macro_rules! hook_impl_private {
+macro_rules! whack_hook_impl_private {
     ($fnptr_hook:ident, $stdcall:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
         impl $name {
             // caller -> assembly wrap -> in_wrap -> hook.
@@ -111,7 +111,7 @@ macro_rules! hook_impl_private {
                 let in_wrap_addr = $name::in_wrap as *const u8;
                 let mut wrapper =
                     $crate::platform::HookWrapAssembler::new(in_wrap_addr, target, $stdcall);
-                hook_initialize_wrapper!(wrapper, [$($aloc, $apos),*]);
+                whack_hook_initialize_wrapper!(wrapper, [$($aloc, $apos),*]);
                 wrapper
             }
         }
@@ -120,7 +120,7 @@ macro_rules! hook_impl_private {
 
 #[macro_export]
 #[doc(hidden)]
-macro_rules! hook_wrapper_impl {
+macro_rules! whack_hook_wrapper_impl {
     ($ret:ty, $([$aty:ty])*) => {
         fn write_target_objects(target: T) -> Box<[u8]> {
             unsafe {
@@ -144,15 +144,15 @@ macro_rules! hook_wrapper_impl {
 
 #[macro_export]
 #[doc(hidden)]
-macro_rules! hook_initialize_wrapper {
+macro_rules! whack_hook_initialize_wrapper {
     ($wrapper:expr, [stack, $next_pos:expr $(,$aloc:ident, $apos:expr)*]) => {{
         $wrapper.add_arg($crate::platform::Location::Stack($next_pos));
-        hook_initialize_wrapper!($wrapper, [$($aloc, $apos),*]);
+        whack_hook_initialize_wrapper!($wrapper, [$($aloc, $apos),*]);
     }};
     ($wrapper:expr, [$next:ident, $next_pos:expr $(,$aloc:ident, $apos:expr)*]) => {{
-        let reg_id = reg_id!($next);
+        let reg_id = whack_reg_id!($next);
         $wrapper.add_arg($crate::platform::Location::Register(reg_id));
-        hook_initialize_wrapper!($wrapper, [$($aloc, $apos),*]);
+        whack_hook_initialize_wrapper!($wrapper, [$($aloc, $apos),*]);
     }};
     ($wrapper:expr, []) => {
     }

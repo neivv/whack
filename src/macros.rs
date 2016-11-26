@@ -56,14 +56,14 @@ pub trait ExportHook {
 /// To hook by an ordinal, specify it before name in parentheses like this:
 ///
 /// ```
-/// export_hook!(pub extern "system" (92) Function(u32) -> u32);
+/// whack_export!(pub extern "system" (92) Function(u32) -> u32);
 /// ```
 ///
 /// # Examples
 /// ```rust,no_run
 /// # #[macro_use] extern crate whack;
 /// # fn main() {}
-/// export_hook!(pub extern "system" IsDebuggerPresent() -> u32);
+/// whack_export!(pub extern "system" IsDebuggerPresent() -> u32);
 ///
 /// fn hide_debugger() {
 ///     let mut patcher = whack::Patcher::new();
@@ -80,7 +80,7 @@ pub trait ExportHook {
 /// }
 /// ```
 #[macro_export]
-macro_rules! export_hook {
+macro_rules! whack_export {
     (pub extern "system" ($ord:expr) $name:ident($($aty:tt)*) -> $ret:ty) => {
         whack_name_args!([imp, yes, system, $ord, $name, $ret], [$([$aty])*]);
     };
@@ -102,17 +102,18 @@ macro_rules! export_hook {
 }
 
 #[macro_export]
-macro_rules! declare_hooks {
+macro_rules! whack_hooks {
     (stdcall, $base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
-        $(address_hook!(stdcall, $base, $addr, pub $name($($args)*) $(-> $ret)*);)*
+        $(whack_address_hook!(stdcall, $base, $addr, pub $name($($args)*) $(-> $ret)*);)*
     };
     ($base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
-        $(address_hook!(cdecl, $base, $addr, pub $name($($args)*) $(-> $ret)*);)*
+        $(whack_address_hook!(cdecl, $base, $addr, pub $name($($args)*) $(-> $ret)*);)*
     };
 }
 
 #[macro_export]
-macro_rules! address_hook {
+#[doc(hidden)]
+macro_rules! whack_address_hook {
     ($abi:ident, $base:expr, $addr:expr, pub $name:ident($($aty:tt)*)) => {
         whack_name_args!([addr, yes, $abi, $base, $addr, $name, ()], [$([$aty])*]);
     };
@@ -419,13 +420,13 @@ macro_rules! whack_fnwrap_write_arg {
         $buf.stack($apos);
     };
     ($buf:expr, [$aloc:ident ~ $apos:expr]) => {
-        $buf.register(reg_id!($aloc));
+        $buf.register(whack_reg_id!($aloc));
     };
 }
 
 #[macro_export]
 #[doc(hidden)]
-macro_rules! maybe_pub_struct {
+macro_rules! whack_maybe_pub_struct {
     (yes, $name:ident) => { pub struct $name; };
     (no, $name:ident) => { struct $name; };
 }
@@ -557,20 +558,20 @@ macro_rules! whack_name_args_recurse {
     (nope, $imp_stack_pos:expr, [addr, $($other:tt),*],
      [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],
      [$($rest:ident),*], [$($rest_loc:ident($rest_pos:expr)),*]) => {
-        impl_addr_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
+        whack_impl_addr_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
     };
     (yup, $imp_stack_pos:expr, [addr, $($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
      [$($rest:ident),*]) => {
-        impl_addr_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
+        whack_impl_addr_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
     };
     (nope, $imp_stack_pos:expr, [imp, $($other:tt),*],
      [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],
      [$($rest:ident),*], [$($rest_loc:ident($rest_pos:expr)),*]) => {
-        impl_import_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
+        whack_impl_import_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
     };
     (yup, $imp_stack_pos:expr, [imp, $($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
      [$($rest:ident),*]) => {
-        impl_import_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
+        whack_impl_import_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
     };
     (nope, $imp_stack_pos:expr, [fnwrap, $($other:tt),*],
      [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],
