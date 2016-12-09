@@ -53,6 +53,9 @@ pub struct ExecutableHeap {
     handle: HANDLE,
 }
 
+unsafe impl Send for ExecutableHeap {
+}
+
 impl ExecutableHeap {
     pub fn new() -> ExecutableHeap {
         ExecutableHeap {

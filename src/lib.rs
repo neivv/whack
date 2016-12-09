@@ -63,6 +63,9 @@ enum ModulePatchType {
     Import(ImportHook, *const u8, *const u8),
 }
 
+unsafe impl Send for ModulePatchType {
+}
+
 struct ReplacingPatch {
     data: SmallVec<[u8; 16]>,
     backup_buf: SmallVec<[u8; 16]>,
