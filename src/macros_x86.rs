@@ -163,9 +163,9 @@ macro_rules! whack_hook_initialize_wrapper {
 macro_rules! whack_name_args {
     ([$($rest:tt),*], [$([$args:tt])*]) => {
         whack_name_args_recurse!(nope, 0, [$($rest),*], [], [$($args)*],
-            [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11],
+            [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15],
             [stack(0), stack(1), stack(2), stack(3), stack(4),
             stack(5), stack(6), stack(7), stack(8), stack(9),
-            stack(10)]);
+            stack(10), stack(11), stack(12), stack(13), stack(14)]);
     };
 }
