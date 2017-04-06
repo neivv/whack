@@ -449,7 +449,7 @@ impl AssemblerBuf {
     }
 
     pub fn fixup_to_position(&mut self, fixup_pos: AsmFixupPos) {
-        self.fixups[fixup_pos.0].1 = self.buf.as_ptr() as u64 + self.buf.len() as u64;
+        self.fixups[fixup_pos.0].1 = self.buf.len() as u64;
     }
 
     pub fn align(&mut self, amount: usize) {
@@ -477,7 +477,7 @@ impl AssemblerBuf {
     }
 
     pub fn write(&self, out: *mut u8) {
-        let diff = (out as usize).wrapping_sub(self.buf.as_ptr() as usize);
+        let diff = out as usize;
         unsafe {
             ptr::copy_nonoverlapping(self.buf.as_ptr(), out, self.buf.len());
             for &(fixup, value) in self.fixups.iter() {

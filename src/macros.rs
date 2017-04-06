@@ -55,9 +55,9 @@ pub trait ExportHook {
 /// If the function is exported with a name, the hook's name must match the exported name.
 /// To hook by an ordinal, specify it before name in parentheses like this:
 ///
-/// ```
+/// `
 /// whack_export!(pub extern "system" (92) Function(u32) -> u32);
-/// ```
+/// `
 ///
 /// # Examples
 /// ```rust,no_run

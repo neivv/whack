@@ -358,7 +358,7 @@ impl AssemblerBuf {
 
     pub fn fixup_to_position(&mut self, fixup_pos: AsmFixupPos) {
         let off = self.fixups[fixup_pos.0];
-        let val = self.buf.as_ptr() as u32 + self.buf.len() as u32;
+        let val = self.buf.len() as u32;
         (&mut self.buf[off .. off + 4]).write_u32::<LittleEndian>(val).unwrap();
     }
 
@@ -370,7 +370,7 @@ impl AssemblerBuf {
     }
 
     fn write(&self, out: *mut u8) {
-        let diff = (out as usize).wrapping_sub(self.buf.as_ptr() as usize);
+        let diff = out as usize;
         unsafe {
             copy_instructions(self.buf.as_ptr(), out, self.buf.len());
             for &fixup in self.fixups.iter() {

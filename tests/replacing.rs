@@ -1,4 +1,3 @@
-#[macro_use]
 extern crate whack;
 extern crate kernel32;
 extern crate winapi;
