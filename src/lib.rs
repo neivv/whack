@@ -563,17 +563,26 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     /// be specified as `|first, second, orig: &Fn(_, _) -> _|`.
     pub unsafe fn hook_closure<H, T>(&mut self, _hook: H, target: T) -> Patch
     where H: AddressHookClosure<T> {
-        self.add_hook::<H, T>(target, true)
+        self.add_hook::<H, T>(target, true, H::address())
+    }
+
+    /// Creates a hook to any address, insted of the usual case where the address is
+    /// specified during hook declaration.
+    ///
+    /// Address is relative to the module base.
+    pub unsafe fn hook_closure_address<H, T>(&mut self, _hook: H, target: T, address: usize) -> Patch
+    where H: AddressHookClosure<T> {
+        self.add_hook::<H, T>(target, true, address)
     }
 
     // Not shown since calling `orig` is actually not allowed.
     #[doc(hidden)]
     pub unsafe fn call_hook_closure<H, T>(&mut self, _hook: H, target: T) -> Patch
     where H: AddressHookClosure<T> {
-        self.add_hook::<H, T>(target, false)
+        self.add_hook::<H, T>(target, false, H::address())
     }
 
-    fn add_hook<H, T>(&mut self, target: T, replacing: bool) -> Patch
+    fn add_hook<H, T>(&mut self, target: T, replacing: bool, address: usize) -> Patch
     where H: AddressHookClosure<T> {
         let target = H::write_target_objects(target);
         let patch = ModulePatch {
@@ -583,7 +592,7 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
                 wrapper: None,
                 orig_ins_len: 0,
                 replacing: replacing,
-                address: H::address(),
+                address: address,
             }),
             library: self.library.clone(),
             active: false,
