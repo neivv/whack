@@ -585,9 +585,21 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     fn add_hook<H, T>(&mut self, target: T, replacing: bool, address: usize) -> Patch
     where H: AddressHookClosure<T> {
         let target = H::write_target_objects(target);
+        let assembler = H::wrapper_assembler(target.as_ptr());
+        self.add_hook_nongeneric(target, assembler, replacing, address)
+    }
+
+    // Code size optimization
+    fn add_hook_nongeneric(
+        &mut self,
+        target: Box<[u8]>,
+        wrapper_assembler: platform::HookWrapAssembler,
+        replacing: bool,
+        address: usize,
+    ) -> Patch {
         let patch = ModulePatch {
             variant: ModulePatchType::Hook(HookPatch {
-                wrapper_code: H::wrapper_assembler(target.as_ptr()),
+                wrapper_code: wrapper_assembler,
                 wrapper_target: target,
                 wrapper: None,
                 orig_ins_len: 0,
