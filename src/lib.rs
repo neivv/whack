@@ -841,12 +841,14 @@ impl<T> Variable<T> {
 
 impl<T> ops::Deref for Variable<T> {
     type Target = T;
+    #[inline]
     fn deref<'a>(&'a self) -> &'a T {
         unsafe { mem::transmute(self.address) }
     }
 }
 
 impl<T> ops::DerefMut for Variable<T> {
+    #[inline]
     fn deref_mut<'a>(&'a mut self) -> &'a mut T {
         unsafe { mem::transmute(self.address) }
     }
