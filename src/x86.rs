@@ -154,12 +154,17 @@ impl HookWrapAssembler {
                          out_wrapper_pos: AsmFixupPos,
                          orig: Option<*const u8>,
                         ) -> usize {
+        let mut preserved_regs: SmallVec<[u8; 8]> = SmallVec::new();
         buffer.reset_stack_offset();
         buffer.fixup_to_position(out_wrapper_pos);
         for (pos, val) in self.args
                 .iter()
                 .enumerate()
                 .filter_map(|(pos, x)| x.reg_to_opt().map(|x| (pos, x))) {
+            if is_preserved_reg(val) {
+                buffer.push(AsmValue::Register(val));
+                preserved_regs.push(val);
+            }
             buffer.mov(AsmValue::Register(val), AsmValue::Stack(pos as i16));
         }
         // Push stack args.
@@ -205,6 +210,9 @@ impl HookWrapAssembler {
         buffer.stack_add(if self.stdcall { 0 } else {
             stack_args.last().map(|x| (x.1 + 1) as usize * 4).unwrap_or(0)
         });
+        for &preserved_reg in preserved_regs.iter().rev() {
+            buffer.pop(AsmValue::Register(preserved_reg));
+        }
         buffer.ret(0);
         delayed_out
     }
