@@ -544,33 +544,33 @@ impl AssemblerBuf {
 
 pub unsafe fn copy_instruction_length(ins: *const u8, min_length: usize) -> usize {
     let mut sum = 0;
-    for (opcode, _) in lde::x86::iter(slice::from_raw_parts(ins, min_length + 32), 0) {
+    for (opcode, _) in lde::x86::lde(slice::from_raw_parts(ins, min_length + 32), 0) {
         if sum >= min_length {
             break;
         }
-        sum += opcode.0.len();
+        sum += opcode.len();
     }
     sum
 }
 
 unsafe fn copy_instructions(src: *const u8, mut dst: *mut u8, min_length: usize) {
     let mut len = min_length as isize;
-    for (opcode, _) in lde::x86::iter(slice::from_raw_parts(src, min_length + 32), 0) {
+    for (opcode, _) in lde::x86::lde(slice::from_raw_parts(src, min_length + 32), 0) {
         if len <= 0 {
             return;
         }
-        let ins_len = opcode.0.len() as isize;
+        let ins_len = opcode.len() as isize;
         // Relative jumps need to be handled differently
-        match opcode.0[0] {
+        match opcode[0] {
             0xe8 | 0xe9 => {
                 assert!(ins_len == 5);
-                ptr::copy_nonoverlapping(opcode.0.as_ptr(), dst, 5);
-                let diff = (dst as usize).wrapping_sub(opcode.0.as_ptr() as usize);
+                ptr::copy_nonoverlapping(opcode.as_ptr(), dst, 5);
+                let diff = (dst as usize).wrapping_sub(opcode.as_ptr() as usize);
                 let value = *(dst.offset(1) as *mut usize);
                 *(dst.offset(1) as *mut usize) = value.wrapping_sub(diff);
 
             }
-            _ => ptr::copy_nonoverlapping(opcode.0.as_ptr(), dst, ins_len as usize),
+            _ => ptr::copy_nonoverlapping(opcode.as_ptr(), dst, ins_len as usize),
         }
         dst = dst.offset(ins_len);
         len -= ins_len;

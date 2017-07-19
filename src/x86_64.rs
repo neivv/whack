@@ -697,11 +697,11 @@ unsafe fn copy_instructions(to: *mut u8, from: *const u8, min_len: usize) -> usi
 
 pub unsafe fn ins_len(ins: *const u8, min_length: usize) -> usize {
     let mut sum = 0;
-    for (opcode, _) in lde::x64::iter(slice::from_raw_parts(ins, min_length + 32), 0) {
+    for (opcode, _) in lde::x64::lde(slice::from_raw_parts(ins, min_length + 32), 0) {
         if sum >= min_length {
             break;
         }
-        sum += opcode.0.len();
+        sum += opcode.len();
     }
     sum
 }
