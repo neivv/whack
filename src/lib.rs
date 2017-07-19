@@ -806,7 +806,7 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
 impl<'a: 'b, 'b> Drop for ModulePatcher<'a, 'b> {
     /// Applies patches with `apply()` if they weren't explicitly applied.
     fn drop(&mut self) {
-        if !self.patches.is_empty() {
+        if !self.patches.is_empty() || !self.init_fns.is_empty() {
             let patches = mem::replace(&mut self.patches, vec![]);
             let library = mem::replace(&mut self.library, None);
             let init_fns = mem::replace(&mut self.init_fns, vec![]);
