@@ -94,20 +94,37 @@ pub struct MemoryProtection {
 
 impl MemoryProtection {
     pub fn new(start: HMODULE) -> MemoryProtection {
+        // This currently may go over to the next module if they are next to each other..
+        // Should have min and max addresses instead.
         let start = start as winapi::LPVOID;
         let mut protections = Vec::new();
         unsafe {
             let mut mem_info: winapi::MEMORY_BASIC_INFORMATION = mem::uninitialized();
             let mut tmp = 0;
-            kernel32::VirtualQuery(start, &mut mem_info, mem::size_of_val(&mem_info) as winapi::SIZE_T);
-            while mem_info.Type == winapi::MEM_IMAGE {
-                kernel32::VirtualProtect(mem_info.BaseAddress,
-                                         mem_info.RegionSize,
-                                         winapi::PAGE_EXECUTE_READWRITE,
-                                         &mut tmp);
-                protections.push((mem_info.BaseAddress as *mut c_void, mem_info.RegionSize, mem_info.Protect));
+            kernel32::VirtualQuery(start, &mut mem_info, mem::size_of_val(&mem_info) as _);
+            let init_type = mem_info.Type;
+            while mem_info.Type == init_type {
+                if mem_info.State == winapi::MEM_COMMIT {
+                    let ok = kernel32::VirtualProtect(
+                        mem_info.BaseAddress,
+                        mem_info.RegionSize,
+                        winapi::PAGE_EXECUTE_READWRITE,
+                        &mut tmp,
+                    );
+                    if ok == 0 {
+                        panic!(
+                            "Couldn't VirtualProtect memory {:p}:{:x} from {:x}: {}",
+                            mem_info.BaseAddress,
+                            mem_info.RegionSize,
+                            mem_info.Protect,
+                            Win32Error::new(),
+                        );
+                    }
+                    let address = mem_info.BaseAddress as *mut c_void;
+                    protections.push((address, mem_info.RegionSize, mem_info.Protect));
+                }
                 let next = mem_info.BaseAddress.offset(mem_info.RegionSize as isize);
-                kernel32::VirtualQuery(next, &mut mem_info, mem::size_of_val(&mem_info) as winapi::SIZE_T);
+                kernel32::VirtualQuery(next, &mut mem_info, mem::size_of_val(&mem_info) as _);
             }
         }
         MemoryProtection {
