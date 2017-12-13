@@ -7,6 +7,7 @@ use lde::{self, InsnSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use smallvec::SmallVec;
 
+use insertion_sort;
 use OrigFuncCallback;
 pub use win_common::*;
 
@@ -227,7 +228,7 @@ impl HookWrapAssembler {
             .filter_map(|(pos, x)| x.stack_to_opt().map(|x| (pos, x)))
             .collect();
 
-        stack_args.sort_by_key(|&(_, target_pos)| target_pos);
+        insertion_sort::sort_by_key(&mut stack_args, |&(_, target_pos)| target_pos);
 
         let stack_args_size = stack_args.last().map(|&(_, x)| x as usize + 1).unwrap_or(0);
         let needs_align = stack_args_size & 1 == 0;
@@ -332,7 +333,7 @@ impl FuncAssembler {
 
     pub fn finish_fnwrap(&mut self, addr: usize, stdcall: bool) {
         let ptr_size = mem::size_of::<usize>();
-        self.current_stack.sort_by_key(|&(_, x)| x);
+        insertion_sort::sort_by_key(&mut self.current_stack, |&(_, x)| x);
         // Align the stack if necessary
         let stack_args_count = self.current_stack.last().map(|&(_, x)| x as usize + 1).unwrap_or(0);
         let needs_align = (stack_args_count + self.preserved_regs.len()) & 1 == 0;
@@ -580,7 +581,7 @@ impl AssemblerBuf {
             (AsmValue::Register(to), AsmValue::Stack(from)) => {
                 let reg_spec_byte = 0x48 + if to >= 8 { 4 } else { 0 };
                 self.buf.write_u8(reg_spec_byte).unwrap();
-                let offset = (from * 8) as i32 + self.stack_offset + 8;
+                let offset = (from as i32 * 8) + 8 + self.stack_offset;
                 match offset {
                     0 => {
                         self.buf.write(&[0x8b, 0x4 + (to & 7) * 8, 0xe4]).unwrap();

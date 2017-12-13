@@ -7,8 +7,10 @@ use lde::{self, InsnSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use smallvec::SmallVec;
 
+use insertion_sort;
 use OrigFuncCallback;
 pub use win_common::*;
+
 
 #[inline]
 pub unsafe fn write_jump(from: *mut u8, to: *const u8) {
@@ -175,7 +177,7 @@ impl HookWrapAssembler {
             .filter_map(|(pos, x)| x.stack_to_opt().map(|x| (pos, x)))
             .collect();
 
-        stack_args.sort_by_key(|&(_, target_pos)| target_pos);
+        insertion_sort::sort_by_key(&mut stack_args, |&(_, target_pos)| target_pos);
         for (pos, diff) in stack_args.last()
             .map(|&(pos, _)| (pos, 1))
             .into_iter()
@@ -256,7 +258,7 @@ impl FuncAssembler {
 
     pub fn finish_fnwrap(&mut self, addr: usize, stdcall: bool) {
         let ptr_size = mem::size_of::<usize>();
-        self.current_stack.sort_by_key(|&(_, x)| x);
+        insertion_sort::sort_by_key(&mut self.current_stack, |&(_, x)| x);
         for (signature_pos, skipped_args) in
             self.current_stack.windows(2).rev()
             .map(|window| (window[0], window[1]))
@@ -445,12 +447,11 @@ impl AssemblerBuf {
         match (to, from) {
             (AsmValue::Register(to), AsmValue::Register(from)) => {
                 if to != from {
-                    self.buf.write_u8(0x89).unwrap();
-                    self.buf.write_u8(0xc0 + from * 8 + to).unwrap();
+                    self.buf.write(&[0x89, 0xc0 + from * 8 + to]).unwrap();
                 }
             }
             (AsmValue::Register(to), AsmValue::Stack(from)) => {
-                let offset = (from * 4) as i32 + self.stack_offset + 4;
+                let offset = (from as i32 * 4) + 4 + self.stack_offset;
                 match offset {
                     0 => {
                         self.buf.write(&[0x8b, 0x4 + to * 8, 0xe4]).unwrap();

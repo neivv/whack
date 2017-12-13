@@ -31,6 +31,7 @@ pub mod platform;
 #[doc(hidden)]
 pub mod platform;
 
+mod insertion_sort;
 mod patch_map;
 
 type InitFn = unsafe fn(usize, &mut platform::ExecutableHeap);
