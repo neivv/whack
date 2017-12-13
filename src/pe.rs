@@ -1,4 +1,4 @@
-use std::ascii::AsciiExt;
+#[allow(unused_imports)] use std::ascii::AsciiExt;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 

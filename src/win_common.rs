@@ -216,7 +216,7 @@ pub fn for_libraries<Cb: FnMut(&OsStr, HMODULE)>(mut callback: Cb) -> Result<(),
 
 #[test]
 fn test_for_libraries() {
-    use std::ascii::AsciiExt;
+    #[allow(unused_imports)] use std::ascii::AsciiExt;
     let mut vec = Vec::new();
     for_libraries(|lib, _handle| vec.push(lib.to_os_string())).unwrap();
     assert!(vec
