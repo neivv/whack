@@ -128,29 +128,22 @@ enum PatchEnum {
 }
 
 impl HookPatch {
-    fn free_wrapper(&mut self, heap: &mut platform::ExecutableHeap) {
-        if let Some(wrapper) = self.wrapper {
-            // Beh, should have better system than this dumb orig_ins_len stuff.
-            unsafe { heap.free(wrapper.offset(0 - self.orig_ins_len as isize) as *mut u8); }
-            self.wrapper = None;
-        }
-    }
-
-    unsafe fn revert(&mut self, address: *mut u8, heap: &mut platform::ExecutableHeap) {
+    unsafe fn revert(&mut self, address: *mut u8) {
         if let Some(wrapper) = self.wrapper {
             let orig_ins = wrapper.offset(0 - self.orig_ins_len as isize);
             std::ptr::copy_nonoverlapping(orig_ins, address, self.orig_ins_len);
         }
-        self.free_wrapper(heap);
     }
 }
 
 impl ModulePatch {
-    unsafe fn enable(&mut self,
-                     handle: platform::LibraryHandle,
-                     heap: &mut platform::ExecutableHeap) {
+    unsafe fn enable(
+        &mut self,
+        handle: platform::LibraryHandle,
+        heap: &mut platform::ExecutableHeap
+    ) {
         if self.active {
-            self.disable(Some(handle), heap);
+            self.disable(Some(handle));
         }
         match self.variant {
             ModulePatchType::Hook(ref mut hook) => {
@@ -174,44 +167,37 @@ impl ModulePatch {
             ModulePatchType::Import(ref hook, ref mut stored_wrapper, ref mut orig) => {
                 let addr = platform::import_addr(handle, &hook.library, &hook.export);
                 if let Some(addr) = addr {
-                    *orig  = *addr as *const u8;
-                    let out_ptr = Some(*orig as *const u8);
-                    let (wrapper, _) = hook.wrapper_code.write_wrapper(None, heap, out_ptr);
-                    *stored_wrapper = wrapper;
-                    *addr = wrapper as usize;
+                    if *stored_wrapper == ptr::null() {
+                        let out_ptr = Some(*addr as *const u8);
+                        let (wrapper, _) = hook.wrapper_code.write_wrapper(None, heap, out_ptr);
+                        *stored_wrapper = wrapper;
+                    }
+                    *orig = *addr as *const u8;
+                    *addr = *stored_wrapper as usize;
                 }
             }
         }
         self.active = true;
     }
 
-    unsafe fn disable(&mut self,
-                      handle: Option<platform::LibraryHandle>,
-                      heap: &mut platform::ExecutableHeap) {
+    unsafe fn disable(&mut self, handle: Option<platform::LibraryHandle>) {
         if self.active {
             if let Some(handle) = handle {
                 match self.variant {
                     ModulePatchType::Hook(ref mut hook) => {
                         let address = (handle as usize + hook.address) as *mut u8;
-                        hook.revert(address, heap);
+                        hook.revert(address);
                     }
                     ModulePatchType::Data(ReplacingPatch { ref backup_buf, address, .. }) => {
                         let address = (handle as usize + address) as *mut u8;
                         ptr::copy_nonoverlapping(backup_buf.as_ptr(), address, backup_buf.len());
                     }
-                    ModulePatchType::Import(ref hook, wrapper, ref orig) => {
+                    ModulePatchType::Import(ref hook, _wrapper, ref orig) => {
                         let addr = platform::import_addr(handle, &hook.library, &hook.export);
                         if let Some(addr) = addr {
                             *addr = *orig as usize;
-                            heap.free(wrapper as *mut u8);
                         }
                     }
-                }
-            } else {
-                match self.variant {
-                    ModulePatchType::Hook(ref mut hook) => hook.free_wrapper(heap),
-                    ModulePatchType::Data(_) => (),
-                    ModulePatchType::Import(_, wrapper, _) => heap.free(wrapper as *mut u8),
                 }
             }
             self.active = false;
@@ -409,7 +395,7 @@ impl<'a> ActivePatcher<'a> {
             PatchEnum::Regular(ref key) => {
                 if let Some(patch) = state.patches.get_mut(key) {
                     let handle = library_name_to_handle_opt(&patch.library);
-                    patch.disable(handle, &mut state.exec_heap);
+                    patch.disable(handle);
                 }
             }
             PatchEnum::Group(ref key) => {
@@ -417,7 +403,7 @@ impl<'a> ActivePatcher<'a> {
                     let handle = library_name_to_handle_opt(&group.library);
                     for key in &group.patches {
                         if let Some(patch) = state.patches.get_mut(key) {
-                            patch.disable(handle, &mut state.exec_heap);
+                            patch.disable(handle);
                         }
                     }
                 }
@@ -517,13 +503,13 @@ impl<'a> ActivePatcher<'a> {
             if let Some(handle) = library_name_to_handle_opt(&group.library) {
                 for key in &group.patches {
                     if let Some(patch) = state.patches.get_mut(key) {
-                        patch.disable(Some(handle), &mut state.exec_heap);
+                        patch.disable(Some(handle));
                     }
                 }
             } else {
                 for key in &group.patches {
                     if let Some(patch) = state.patches.get_mut(key) {
-                        patch.disable(None, &mut state.exec_heap);
+                        patch.disable(None);
                     }
                 }
             }
