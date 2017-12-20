@@ -1,6 +1,5 @@
 #[macro_use]
 extern crate whack;
-extern crate kernel32;
 extern crate winapi;
 
 use std::cell::Cell;
@@ -12,8 +11,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use whack::Patcher;
 
-whack_export!(pub extern "system" CreateFileW(*const u16, u32, u32, u32, u32, u32, u32) -> winapi::HANDLE);
-whack_export!(pub extern "system" CloseHandle(winapi::HANDLE) -> winapi::BOOL);
+use winapi::shared::minwindef::BOOL;
+use winapi::um::fileapi;
+use winapi::um::handleapi::{self, INVALID_HANDLE_VALUE};
+use winapi::um::sysinfoapi;
+use winapi::um::winbase;
+use winapi::um::winnt::{self, HANDLE};
+
+whack_export!(pub extern "system" CreateFileW(*const u16, u32, u32, u32, u32, u32, u32) -> HANDLE);
+whack_export!(pub extern "system" CloseHandle(HANDLE) -> BOOL);
 whack_export!(pub extern "system" GetProfileIntW(*const u16, *const u16, u32) -> u32);
 whack_export!(pub extern "system" GetTickCount() -> u32);
 
@@ -21,7 +27,7 @@ thread_local!(static CLOSE_HANDLE_COUNT: Cell<u32> = Cell::new(0));
 thread_local!(static GET_PROFILE_INT_COUNT: Cell<u32> = Cell::new(0));
 thread_local!(static TICK_COUNT_CALLS: Cell<u32> = Cell::new(0));
 
-unsafe fn close_handle_log(handle: winapi::HANDLE, orig: &Fn(winapi::HANDLE) -> winapi::BOOL) -> winapi::BOOL {
+unsafe fn close_handle_log(handle: HANDLE, orig: &Fn(HANDLE) -> BOOL) -> BOOL {
     CLOSE_HANDLE_COUNT.with(|x| x.set(x.get() + 1));
     orig(handle)
 }
@@ -96,11 +102,11 @@ fn import_hooking() {
         assert!(!std::path::Path::new("file.dat").exists());
         assert!(std::path::Path::new("file.abc").exists());
         let before = CLOSE_HANDLE_COUNT.with(|x| x.get());
-        kernel32::CloseHandle(result);
+        handleapi::CloseHandle(result);
         let after = CLOSE_HANDLE_COUNT.with(|x| x.get());
         assert_eq!(after, before + 1);
         let before = GET_PROFILE_INT_COUNT.with(|x| x.get());
-        kernel32::GetProfileIntW(null_mut(), null_mut(), 0);
+        winbase::GetProfileIntW(null_mut(), null_mut(), 0);
         let after = GET_PROFILE_INT_COUNT.with(|x| x.get());
         assert_eq!(after, before + 1);
         std::fs::remove_file("file.abc").unwrap();
@@ -114,7 +120,7 @@ fn import_hooking() {
         let result = create_file("file.dat");
         assert!(std::path::Path::new("file.dat").exists());
         assert!(!std::path::Path::new("file.abc").exists());
-        kernel32::CloseHandle(result);
+        handleapi::CloseHandle(result);
         std::fs::remove_file("file.dat").unwrap();
     }
     {
@@ -126,29 +132,31 @@ fn import_hooking() {
         let result = create_file("file.dat");
         assert!(!std::path::Path::new("file.dat").exists());
         assert!(std::path::Path::new("file.abc").exists());
-        kernel32::CloseHandle(result);
+        handleapi::CloseHandle(result);
         std::fs::remove_file("file.abc").unwrap();
     }
-    unsafe { kernel32::GetTickCount(); }
+    unsafe { sysinfoapi::GetTickCount(); }
     assert_eq!(get_tick_count_calls(), 0);
     {
         let mut locked = root_patcher.lock().unwrap();
         unsafe { locked.enable_patch(&tick_count_patch); }
     }
     let prev = get_tick_count_calls();
-    unsafe { kernel32::GetTickCount(); }
+    unsafe { sysinfoapi::GetTickCount(); }
     assert_eq!(get_tick_count_calls(), prev + 1);
 }
 
-unsafe fn create_file(path: &str) -> winapi::HANDLE {
-    let result = kernel32::CreateFileW(winapi_str(path).as_ptr(),
-                          winapi::GENERIC_READ | winapi::GENERIC_WRITE,
-                          winapi::FILE_SHARE_READ | winapi::FILE_SHARE_WRITE,
-                          null_mut(),
-                          winapi::CREATE_NEW,
-                          winapi::FILE_ATTRIBUTE_NORMAL,
-                          null_mut());
-    assert!(result != winapi::INVALID_HANDLE_VALUE);
+unsafe fn create_file(path: &str) -> HANDLE {
+    let result = fileapi::CreateFileW(
+        winapi_str(path).as_ptr(),
+        winnt::GENERIC_READ | winnt::GENERIC_WRITE,
+        winnt::FILE_SHARE_READ | winnt::FILE_SHARE_WRITE,
+        null_mut(),
+        fileapi::CREATE_NEW,
+        winnt::FILE_ATTRIBUTE_NORMAL,
+        null_mut()
+    );
+    assert!(result != INVALID_HANDLE_VALUE);
     result
 }
 

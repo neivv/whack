@@ -1,7 +1,6 @@
 extern crate byteorder;
 extern crate lde;
 extern crate libc;
-extern crate kernel32;
 extern crate winapi;
 extern crate rust_win32error;
 #[macro_use(defer)]

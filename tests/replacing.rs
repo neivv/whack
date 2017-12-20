@@ -1,10 +1,13 @@
 extern crate whack;
-extern crate kernel32;
 extern crate winapi;
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
+
+use winapi::um::libloaderapi::{GetProcAddress, LoadLibraryW};
+use winapi::um::memoryapi::{VirtualAlloc};
+use winapi::um::winnt;
 
 use whack::Patcher;
 
@@ -51,17 +54,14 @@ fn dll_name() -> &'static str {
 fn replace() {
     unsafe {
         // Test that it works even if the dll is relocated.
-        kernel32::VirtualAlloc(addr::BASE as winapi::LPVOID,
-                               1,
-                               winapi::MEM_RESERVE,
-                               winapi::PAGE_NOACCESS);
-        let lib = kernel32::LoadLibraryW(winapi_str(dll_path()).as_ptr());
+        VirtualAlloc(addr::BASE as *mut _, 1, winnt::MEM_RESERVE, winnt::PAGE_NOACCESS);
+        let lib = LoadLibraryW(winapi_str(dll_path()).as_ptr());
         assert!(lib != null_mut());
-        let func = kernel32::GetProcAddress(lib, b"test_func\0".as_ptr() as *const i8);
+        let func = GetProcAddress(lib, b"test_func\0".as_ptr() as *const i8);
         assert!(func != null_mut());
-        let func2 = kernel32::GetProcAddress(lib, b"asm_reg_args_h\0".as_ptr() as *const i8);
+        let func2 = GetProcAddress(lib, b"asm_reg_args_h\0".as_ptr() as *const i8);
         assert!(func2 != null_mut());
-        let func3 = kernel32::GetProcAddress(lib, b"asm_reg_stack_args_h\0".as_ptr() as *const i8);
+        let func3 = GetProcAddress(lib, b"asm_reg_stack_args_h\0".as_ptr() as *const i8);
         assert!(func3 != null_mut());
 
         let func = std::mem::transmute::<_, extern fn(u32, u32, u32, u32, u32) -> u32>(func);
