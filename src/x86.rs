@@ -11,11 +11,15 @@ use insertion_sort;
 use OrigFuncCallback;
 pub use win_common::*;
 
-
+const JUMP_INS_LEN: usize = 6;
 #[inline]
-pub unsafe fn write_jump(from: *mut u8, to: *const u8) {
-    *from = 0xe9;
-    *(from.offset(1) as *mut usize) = (to as usize).wrapping_sub(from as usize).wrapping_sub(5);
+pub unsafe fn write_jump_to_ptr(from: *mut u8, to_ptr: *const *const u8) {
+    // jmp [to_ptr]
+    // We want to use a position-independent jump so it works with aliasing view patching.
+    let mut out = slice::from_raw_parts_mut(from, JUMP_INS_LEN);
+    out.write(&[0xff, 0x25]).unwrap();
+    out.write_u32::<LittleEndian>(to_ptr as u32).unwrap();
+    assert_eq!(out.len(), 0);
 }
 
 fn is_preserved_reg(reg: u8) -> bool {
@@ -135,7 +139,7 @@ impl HookWrapAssembler {
         if let OrigFuncCallback::Hook(orig) = orig {
             buffer.popad();
             unsafe {
-                let len = copy_instruction_length(orig, 5);
+                let len = copy_instruction_length(orig, JUMP_INS_LEN);
                 buffer.copy_instructions(orig, len);
                 buffer.jump(AsmValue::Constant(orig as u32 + len as u32));
             }
@@ -198,7 +202,7 @@ impl HookWrapAssembler {
         let delayed_out = if let Some(orig) = orig {
             // Push return address manually
             unsafe {
-                let len = copy_instruction_length(orig, 5);
+                let len = copy_instruction_length(orig, JUMP_INS_LEN);
                 let ret_address = buffer.fixup_position();
                 buffer.push(AsmValue::Undecided);
                 buffer.copy_instructions(orig, len);
@@ -306,20 +310,24 @@ impl HookWrapCode {
     /// Allocates a chunk of executable memory and writes all parts of function entry wrapper
     /// there. (Original code, in wrapper, out wrapper, rust objects), in that order.
     ///
-    /// Returns pointer to the wrapper and original instruction length.
+    /// Returns pointer to the wrapper, original instruction length and pointer to a pointer
+    /// to the wrapper The pointer to pointer is returned so we can use jmp [pointer_to_wrapper]
+    /// without having to separately allocate it. Doing a jump that way is ideal since
+    /// `jmp [0x12345678] it takes only 6 bytes on x86, while `jmp 0x12345678` takes 12, and
+    /// relative jumps don't work with (rather rare use case of) aliasing view patching.
     /// The original instructions will be copied to memory right before the wrapper,
     /// to be used when patch is disabled.
-    pub fn write_wrapper(&self,
-                         orig: Option<*const u8>,
-                         heap: &mut ExecutableHeap,
-                         import_fixup: Option<*const u8>,
-                        ) -> (*const u8, usize)
-    {
+    pub fn write_wrapper(
+        &self,
+        orig: Option<*const u8>,
+        heap: &mut ExecutableHeap,
+        import_fixup: Option<*const u8>,
+    ) -> (*const u8, usize, *const *const u8) {
         let orig_ins_len = match orig {
-            Some(orig) => { unsafe { copy_instruction_length(orig, 5) } },
+            Some(orig) => { unsafe { copy_instruction_length(orig, JUMP_INS_LEN) } },
             None => 0,
         };
-        let wrapper_len = self.buf.len() + orig_ins_len;
+        let wrapper_len = self.buf.len() + orig_ins_len + 4;
         let data = heap.allocate(wrapper_len);
         if let Some(orig) = orig {
             unsafe { ptr::copy_nonoverlapping(orig, data, orig_ins_len) };
@@ -332,7 +340,12 @@ impl HookWrapCode {
                 *(wrapper.offset(offset) as *mut usize) = fixup as usize;
             }
         }
-        (wrapper, orig_ins_len)
+        let wrapper_ptr = unsafe {
+            let ptr = wrapper.offset(self.buf.len() as isize) as *mut *const u8;
+            *ptr = wrapper;
+            ptr
+        };
+        (wrapper, orig_ins_len, wrapper_ptr)
     }
 }
 

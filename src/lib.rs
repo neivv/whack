@@ -44,6 +44,8 @@ use std::marker::{PhantomData, Sync};
 use std::path::Path;
 use std::sync::{Arc, MutexGuard, Mutex};
 
+use libc::c_void;
+
 use smallvec::SmallVec;
 
 use patch_map::PatchMap;
@@ -80,6 +82,7 @@ struct HookPatch {
     wrapper_target: Box<[u8]>,
     wrapper: Option<*const u8>,
     orig_ins_len: usize,
+    pointer_to_wrapper: *const *const u8,
     // Is this a replacing hook or just a detour
     replacing: bool,
     // Relative from base address
@@ -88,16 +91,56 @@ struct HookPatch {
 
 struct ModulePatch {
     variant: ModulePatchType,
-    library: Option<Arc<platform::LibraryName>>,
+    image_base: ImageBase,
     // Is the patch is actually applied to a module (hooks have allocated their wrapper code)
     active: bool,
 }
 
-fn library_name_to_handle_opt(val: &Option<Arc<platform::LibraryName>>)
-    -> Option<platform::LibraryHandle> {
+#[derive(Clone, Eq, PartialEq)]
+enum ImageBase {
+    Executable,
+    Library(Arc<platform::LibraryName>),
+    // Allows separate addresses for writing and out wrapper targets
+    Memory { write: *mut c_void, exec: *mut c_void },
+}
+
+unsafe impl Send for ImageBase {}
+unsafe impl Sync for ImageBase {}
+
+impl ImageBase {
+    fn is_memory_address(&self) -> bool {
+        match *self {
+            ImageBase::Memory { .. } => true,
+            _ => false,
+        }
+    }
+}
+
+fn image_base_to_handles_opt(val: &ImageBase) -> Option<PatchEnableHandles> {
     match *val {
-        Some(ref s) => platform::library_name_to_handle(s),
-        None => Some(platform::exe_handle()),
+        ImageBase::Executable => Some(PatchEnableHandles::same(platform::exe_handle())),
+        ImageBase::Library(ref s) => {
+            platform::library_name_to_handle(s).map(|x| PatchEnableHandles::same(x))
+        }
+        ImageBase::Memory { exec, write } => Some(PatchEnableHandles {
+            exec: exec as platform::LibraryHandle,
+            write: write as platform::LibraryHandle,
+        }),
+    }
+}
+
+/// For supporting different exec-read/write addresses
+struct PatchEnableHandles {
+    exec: platform::LibraryHandle,
+    write: platform::LibraryHandle,
+}
+
+impl PatchEnableHandles {
+    fn same(handle: platform::LibraryHandle) -> PatchEnableHandles {
+        PatchEnableHandles {
+            exec: handle,
+            write: handle,
+        }
     }
 }
 
@@ -139,37 +182,42 @@ impl HookPatch {
 impl ModulePatch {
     unsafe fn enable(
         &mut self,
-        handle: platform::LibraryHandle,
+        handles: &PatchEnableHandles,
         heap: &mut platform::ExecutableHeap
     ) {
         if self.active {
-            self.disable(Some(handle));
+            self.disable(Some(handles.write));
         }
         match self.variant {
             ModulePatchType::Hook(ref mut hook) => {
-                let address = (handle as usize + hook.address) as *const u8;
-                let orig = match hook.replacing {
-                    true => OrigFuncCallback::Overwritten(address),
-                    false => OrigFuncCallback::Hook(address),
-                };
-                let (wrapper, orig_ins_len) = hook.wrapper_code.generate_wrapper_code(orig)
-                    .write_wrapper(Some(address), heap, None);
-                platform::write_jump(address as *mut u8, wrapper);
-                hook.wrapper = Some(wrapper);
-                hook.orig_ins_len = orig_ins_len;
+                let address = (handles.exec as usize + hook.address) as *const u8;
+                let write_address = (handles.write as usize + hook.address) as *const u8;
+                if hook.wrapper.is_none() {
+                    let orig = match hook.replacing {
+                        true => OrigFuncCallback::Overwritten(address),
+                        false => OrigFuncCallback::Hook(address),
+                    };
+                    let (wrapper, orig_ins_len, pointer_to_wrapper) =
+                        hook.wrapper_code.generate_wrapper_code(orig)
+                            .write_wrapper(Some(address), heap, None);
+                    hook.wrapper = Some(wrapper);
+                    hook.pointer_to_wrapper = pointer_to_wrapper;
+                    hook.orig_ins_len = orig_ins_len;
+                }
+                platform::write_jump_to_ptr(write_address as *mut u8, hook.pointer_to_wrapper);
             }
             ModulePatchType::Data(ref mut patch) => {
-                let address = (handle as usize + patch.address) as *const u8;
+                let address = (handles.write as usize + patch.address) as *const u8;
                 let len = patch.data.len();
                 ptr::copy_nonoverlapping(address, patch.backup_buf.as_mut_ptr(), len);
                 ptr::copy_nonoverlapping(patch.data.as_ptr(), address as *mut u8, len);
             }
             ModulePatchType::Import(ref hook, ref mut stored_wrapper, ref mut orig) => {
-                let addr = platform::import_addr(handle, &hook.library, &hook.export);
+                let addr = platform::import_addr(handles.write, &hook.library, &hook.export);
                 if let Some(addr) = addr {
                     if *stored_wrapper == ptr::null() {
                         let out_ptr = Some(*addr as *const u8);
-                        let (wrapper, _) = hook.wrapper_code.write_wrapper(None, heap, out_ptr);
+                        let (wrapper, _, _) = hook.wrapper_code.write_wrapper(None, heap, out_ptr);
                         *stored_wrapper = wrapper;
                     }
                     *orig = *addr as *const u8;
@@ -232,7 +280,7 @@ struct PatcherState {
 
 /// Groups of patches that apply to a single module.
 struct PatchGroup {
-    library: Option<Arc<platform::LibraryName>>,
+    image_base: ImageBase,
     patches: Vec<patch_map::Key>,
     init_funcs: Vec<InitFn>,
 }
@@ -249,7 +297,7 @@ struct PatchGroup {
 pub struct ModulePatcher<'a: 'b, 'b> {
     parent: &'b mut ActivePatcher<'a>,
     patches: Vec<(ModulePatch, patch_map::Key)>,
-    library: Option<Arc<platform::LibraryName>>,
+    image_base: ImageBase,
     init_fns: Vec<InitFn>,
     excepted_base: usize,
 }
@@ -299,7 +347,7 @@ impl<'a> ActivePatcher<'a> {
             parent: self,
             patches: Vec::new(),
             init_fns: Vec::new(),
-            library: None,
+            image_base: ImageBase::Executable,
             excepted_base: excepted_base,
         }
     }
@@ -319,7 +367,33 @@ impl<'a> ActivePatcher<'a> {
             parent: self,
             patches: Vec::new(),
             init_fns: Vec::new(),
-            library: Some(Arc::new(platform::library_name(library))),
+            image_base: ImageBase::Library(Arc::new(platform::library_name(library))),
+            excepted_base: excepted_base,
+        }
+    }
+
+    /// Begins patching arbitrary memory location as if it were a module.
+    ///
+    /// It is possible to use different addresses that are backed by same memory if other
+    /// should be writable and other executable.
+    ///
+    /// Unlike with `patch_exe` and `patch_library` memory is no unprotected automatically,
+    /// the caller is responsible for taking care of the memory being writable.
+    ///
+    /// Call methods of the returned `ModulePatcher` to apply hooks.
+    /// Applying constant/nop patches requires specifying `excepted_base`, otherwise it can
+    /// be 0.
+    pub fn patch_memory<'b>(
+        &'b mut self,
+        write: *mut c_void,
+        execute: *mut c_void,
+        excepted_base: usize
+    ) -> ModulePatcher<'a, 'b> {
+        ModulePatcher {
+            parent: self,
+            patches: Vec::new(),
+            init_fns: Vec::new(),
+            image_base: ImageBase::Memory { write, exec: execute },
             excepted_base: excepted_base,
         }
     }
@@ -394,16 +468,18 @@ impl<'a> ActivePatcher<'a> {
         match *patch {
             PatchEnum::Regular(ref key) => {
                 if let Some(patch) = state.patches.get_mut(key) {
-                    let handle = library_name_to_handle_opt(&patch.library);
-                    patch.disable(handle);
+                    let write_handle =
+                        image_base_to_handles_opt(&patch.image_base).map(|x| x.write);
+                    patch.disable(write_handle);
                 }
             }
             PatchEnum::Group(ref key) => {
                 if let Some(group) = state.patch_groups.get_mut(key) {
-                    let handle = library_name_to_handle_opt(&group.library);
+                    let write_handle =
+                        image_base_to_handles_opt(&group.image_base).map(|x| x.write);
                     for key in &group.patches {
                         if let Some(patch) = state.patches.get_mut(key) {
-                            patch.disable(handle);
+                            patch.disable(write_handle);
                         }
                     }
                 }
@@ -426,20 +502,20 @@ impl<'a> ActivePatcher<'a> {
         match *patch {
             PatchEnum::Regular(ref key) => {
                 if let Some(patch) = state.patches.get_mut(key) {
-                    if let Some(handle) = library_name_to_handle_opt(&patch.library) {
-                        patch.enable(handle, &mut state.exec_heap);
+                    if let Some(ref handles) = image_base_to_handles_opt(&patch.image_base) {
+                        patch.enable(handles, &mut state.exec_heap);
                     }
                 }
             }
             PatchEnum::Group(ref key) => {
                 if let Some(group) = state.patch_groups.get_mut(key) {
-                    if let Some(handle) = library_name_to_handle_opt(&group.library) {
+                    if let Some(ref handles) = image_base_to_handles_opt(&group.image_base) {
                         for func in &group.init_funcs {
-                            func(handle as usize, &mut state.exec_heap);
+                            func(handles.exec as usize, &mut state.exec_heap);
                         }
                         for key in &group.patches {
                             if let Some(patch) = state.patches.get_mut(key) {
-                                patch.enable(handle, &mut state.exec_heap);
+                                patch.enable(handles, &mut state.exec_heap);
                             }
                         }
                     }
@@ -448,15 +524,19 @@ impl<'a> ActivePatcher<'a> {
         }
     }
 
-    fn unprotect_patch_memory(&self,
-                              patch: &PatchEnum,
-                              protections: &mut SmallVec<[(platform::LibraryHandle,
-                                                           platform::MemoryProtection); 16]>)
+    fn unprotect_patch_memory(
+        &self,
+        patch: &PatchEnum,
+        protections: &mut SmallVec<[(platform::LibraryHandle, platform::MemoryProtection); 16]>,
+    )
     {
-        let add_handle_if_needed = |protections: &mut SmallVec<[(platform::LibraryHandle,
-                                                                 platform::MemoryProtection); 16]>,
-                                    handle|
-        {
+        let add_handle_if_needed = |
+            protections: &mut SmallVec<[(
+                platform::LibraryHandle,
+                platform::MemoryProtection,
+            ); 16]>,
+            handle
+        | {
             if !protections.iter().any(|&(x, _)| x == handle) {
                 let protection = platform::MemoryProtection::new(handle);
                 protections.push((handle, protection));
@@ -464,15 +544,21 @@ impl<'a> ActivePatcher<'a> {
         };
         match *patch {
             PatchEnum::Regular(ref key) => {
-                if let Some(handle) = self.state.patches.get(key)
-                    .and_then(|p| library_name_to_handle_opt(&p.library)) {
-                    add_handle_if_needed(protections, handle);
+                if let Some(handles) = self.state.patches.get(key)
+                    .and_then(|p| match p.image_base {
+                        ImageBase::Memory { .. } => None,
+                        _ => image_base_to_handles_opt(&p.image_base)
+                    }) {
+                    add_handle_if_needed(protections, handles.write);
                 }
             }
             PatchEnum::Group(ref key) => {
-                if let Some(handle) = self.state.patch_groups.get(key)
-                    .and_then(|p| library_name_to_handle_opt(&p.library)) {
-                    add_handle_if_needed(protections, handle);
+                if let Some(handles) = self.state.patch_groups.get(key)
+                    .and_then(|p| match p.image_base {
+                        ImageBase::Memory { .. } => None,
+                        _ => image_base_to_handles_opt(&p.image_base)
+                    }) {
+                    add_handle_if_needed(protections, handles.write);
                 }
             }
         }
@@ -485,10 +571,12 @@ impl<'a> ActivePatcher<'a> {
         let mut protections =
             SmallVec::<[(platform::LibraryHandle, platform::MemoryProtection); 16]>::new();
         for group in state.patch_groups.iter() {
-            if let Some(handle) = library_name_to_handle_opt(&group.library) {
-                if !protections.iter().any(|&(x, _)| x == handle) {
-                    let protection = platform::MemoryProtection::new(handle);
-                    protections.push((handle, protection));
+            if !group.image_base.is_memory_address() {
+                if let Some(handles) = image_base_to_handles_opt(&group.image_base) {
+                    if !protections.iter().any(|&(x, _)| x == handles.write) {
+                        let protection = platform::MemoryProtection::new(handles.write);
+                        protections.push((handles.write, protection));
+                    }
                 }
             }
         }
@@ -500,10 +588,10 @@ impl<'a> ActivePatcher<'a> {
         let _protections = self.unprotect_all_patch_memory();
         let state = &mut *self.state;
         for group in state.patch_groups.iter_mut() {
-            if let Some(handle) = library_name_to_handle_opt(&group.library) {
+            if let Some(handles) = image_base_to_handles_opt(&group.image_base) {
                 for key in &group.patches {
                     if let Some(patch) = state.patches.get_mut(key) {
-                        patch.disable(Some(handle));
+                        patch.disable(Some(handles.write));
                     }
                 }
             } else {
@@ -521,13 +609,13 @@ impl<'a> ActivePatcher<'a> {
         let _protections = self.unprotect_all_patch_memory();
         let state = &mut *self.state;
         for group in state.patch_groups.iter_mut() {
-            if let Some(handle) = library_name_to_handle_opt(&group.library) {
+            if let Some(ref handles) = image_base_to_handles_opt(&group.image_base) {
                 for func in &group.init_funcs {
-                    func(handle as usize, &mut state.exec_heap);
+                    func(handles.exec as usize, &mut state.exec_heap);
                 }
                 for key in &group.patches {
                     if let Some(patch) = state.patches.get_mut(key) {
-                        patch.enable(handle, &mut state.exec_heap);
+                        patch.enable(handles, &mut state.exec_heap);
                     }
                 }
             }
@@ -589,10 +677,11 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
                 wrapper_target: target,
                 wrapper: None,
                 orig_ins_len: 0,
+                pointer_to_wrapper: ptr::null(),
                 replacing: replacing,
                 address: address,
             }),
-            library: self.library.clone(),
+            image_base: self.image_base.clone(),
             active: false,
         };
         let key = self.parent.state.patches.alloc_slot();
@@ -637,8 +726,8 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
         // Have to do this as actually consuming is not allowed due to Drop impl
         let patches = mem::replace(&mut self.patches, vec![]);
         let init_fns = mem::replace(&mut self.init_fns, vec![]);
-        let library = mem::replace(&mut self.library, None);
-        ModulePatcher::apply_patches(self.parent, patches, init_fns, library, true)
+        let image_base = mem::replace(&mut self.image_base, ImageBase::Executable);
+        ModulePatcher::apply_patches(self.parent, patches, init_fns, image_base, true)
     }
 
     /// Applies the patches which have been created using this `ModulePatcher`, without
@@ -648,29 +737,32 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     pub fn apply_disabled(mut self) -> Patch {
         let patches = mem::replace(&mut self.patches, vec![]);
         let init_fns = mem::replace(&mut self.init_fns, vec![]);
-        let library = mem::replace(&mut self.library, None);
-        ModulePatcher::apply_patches(self.parent, patches, init_fns, library, false)
+        let image_base = mem::replace(&mut self.image_base, ImageBase::Executable);
+        ModulePatcher::apply_patches(self.parent, patches, init_fns, image_base, false)
     }
 
     fn apply_patches(parent: &mut ActivePatcher,
                      mut patches: Vec<(ModulePatch, patch_map::Key)>,
                      init_fns: Vec<InitFn>,
-                     library: Option<Arc<platform::LibraryName>>,
+                     image_base: ImageBase,
                      enable: bool
                     ) -> Patch
     {
-        let handle = library_name_to_handle_opt(&library);
-        if let Some(handle) = handle {
+        let handles = image_base_to_handles_opt(&image_base);
+        if let Some(ref handles) = handles {
             for func in &init_fns {
-                unsafe { func(handle as usize, &mut parent.state.exec_heap); }
+                unsafe { func(handles.exec as usize, &mut parent.state.exec_heap); }
             }
         }
 
         if enable {
-            if let Some(handle) = handle {
-                let _protection = platform::MemoryProtection::new(handle);
+            if let Some(ref handles) = handles {
+                let _protection;
+                if !image_base.is_memory_address() {
+                    _protection = platform::MemoryProtection::new(handles.write);
+                }
                 for &mut (ref mut patch, _) in &mut patches {
-                    unsafe { patch.enable(handle, &mut parent.state.exec_heap); }
+                    unsafe { patch.enable(handles, &mut parent.state.exec_heap); }
                 }
             }
         }
@@ -683,7 +775,7 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
         }
 
         let group_key = parent.state.patch_groups.insert(PatchGroup {
-            library: library,
+            image_base: image_base,
             patches: keys,
             init_funcs: init_fns,
         });
@@ -705,6 +797,8 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     ///
     /// Generally you'd use integer values, if there are other `repr(C)` types that can be safely
     /// copied to memory, they can be used as well.
+    ///
+    /// `address` uses the expected base which was specified when creating this `ModulePatcher`.
     pub unsafe fn replace_val<T: Copy>(&mut self, address: usize, val: T) -> Patch {
         use std::{mem, slice};
         let slice = slice::from_raw_parts(&val as *const T as *const u8, mem::size_of::<T>());
@@ -712,6 +806,8 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     }
 
     /// Replaces `length` bytes starting from `address` with nop instructions.
+    ///
+    /// `address` uses the expected base which was specified when creating this `ModulePatcher`.
     pub unsafe fn nop(&mut self, address: usize, length: usize) -> Patch {
         use std::iter::repeat;
         let nops: SmallVec<[u8; 16]> = repeat(platform::nop()).take(length).collect();
@@ -719,6 +815,8 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     }
 
     /// Writes bytes from `mem` into `address`.
+    ///
+    /// `address` uses the expected base which was specified when creating this `ModulePatcher`.
     pub unsafe fn replace(&mut self, address: usize, mem: &[u8]) -> Patch {
         let patch = ModulePatch {
             variant: ModulePatchType::Data(ReplacingPatch {
@@ -726,7 +824,7 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
                 backup_buf: std::iter::repeat(0).take(mem.len()).collect(),
                 address: address - self.excepted_base,
             }),
-            library: self.library.clone(),
+            image_base: self.image_base.clone(),
             active: false,
         };
         let key = self.parent.state.patches.alloc_slot();
@@ -755,7 +853,7 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
                     .generate_wrapper_code(OrigFuncCallback::ImportHook),
                 wrapper_target: wrapper_target,
             }, ptr::null(), ptr::null()),
-            library: self.library.clone(),
+            image_base: self.image_base.clone(),
             active: false,
         };
         let key = self.parent.state.patches.alloc_slot();
@@ -787,6 +885,14 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     {
         hook.import_opt(self, library, target)
     }
+
+    /// Allocates memory from patcher's executable memory heap.
+    ///
+    /// The allocated memory cannot be freed.
+    pub fn exec_alloc(&mut self, size: usize) -> &'static mut [u8] {
+        let mem = self.parent.state.exec_heap.allocate(size);
+        unsafe { ::std::slice::from_raw_parts_mut(mem, size) }
+    }
 }
 
 impl<'a: 'b, 'b> Drop for ModulePatcher<'a, 'b> {
@@ -794,9 +900,9 @@ impl<'a: 'b, 'b> Drop for ModulePatcher<'a, 'b> {
     fn drop(&mut self) {
         if !self.patches.is_empty() || !self.init_fns.is_empty() {
             let patches = mem::replace(&mut self.patches, vec![]);
-            let library = mem::replace(&mut self.library, None);
+            let image_base = mem::replace(&mut self.image_base, ImageBase::Executable);
             let init_fns = mem::replace(&mut self.init_fns, vec![]);
-            ModulePatcher::apply_patches(self.parent, patches, init_fns, library, true);
+            ModulePatcher::apply_patches(self.parent, patches, init_fns, image_base, true);
         }
     }
 }

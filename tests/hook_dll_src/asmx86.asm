@@ -16,6 +16,8 @@ _asm_reg_args:
     sub eax, ecx
     ret
 
+db '\x90\x90\x90\x90\x90\x90\x90'
+
 global _asm_reg_stack_args_h
 _asm_reg_stack_args_h:
     mov eax, [esp + 4]

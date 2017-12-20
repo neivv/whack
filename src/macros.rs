@@ -169,7 +169,7 @@ macro_rules! whack_addr_hook_common {
                     // "Memory leak", should return (*const u8, Patch)
                     unsafe { (*Box::into_raw(data)).as_ptr() }
                 };
-                let (wrapper, _) = H::wrapper_assembler(target_closure)
+                let (wrapper, _, _) = H::wrapper_assembler(target_closure)
                     .generate_wrapper_code($crate::OrigFuncCallback::None)
                     .write_wrapper(None, exec_heap, None);
                 wrapper as *const u8
