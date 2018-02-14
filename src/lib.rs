@@ -299,7 +299,7 @@ pub struct ModulePatcher<'a: 'b, 'b> {
     patches: Vec<(ModulePatch, patch_map::Key)>,
     image_base: ImageBase,
     init_fns: Vec<InitFn>,
-    excepted_base: usize,
+    expected_base: usize,
 }
 
 impl Patcher {
@@ -340,26 +340,26 @@ impl<'a> ActivePatcher<'a> {
     /// Begins patching the executable.
     ///
     /// Call methods of the returned `ModulePatcher` to apply hooks.
-    /// Applying constant/nop patches requires specifying `excepted_base`, otherwise it can
+    /// Applying constant/nop patches requires specifying `expected_base`, otherwise it can
     /// be 0.
-    pub fn patch_exe<'b>(&'b mut self, excepted_base: usize) -> ModulePatcher<'a, 'b> {
+    pub fn patch_exe<'b>(&'b mut self, expected_base: usize) -> ModulePatcher<'a, 'b> {
         ModulePatcher {
             parent: self,
             patches: Vec::new(),
             init_fns: Vec::new(),
             image_base: ImageBase::Executable,
-            excepted_base: excepted_base,
+            expected_base: expected_base,
         }
     }
 
     /// Begins patching a library
     ///
     /// Call methods of the returned `ModulePatcher` to apply hooks.
-    /// Applying constant/nop patches requires specifying `excepted_base`, otherwise it can
+    /// Applying constant/nop patches requires specifying `expected_base`, otherwise it can
     /// be 0.
     pub fn patch_library<'b, T>(&'b mut self,
                                 library: T,
-                                excepted_base: usize
+                                expected_base: usize
                                 ) -> ModulePatcher<'a, 'b>
     where T: AsRef<OsStr>
     {
@@ -368,7 +368,7 @@ impl<'a> ActivePatcher<'a> {
             patches: Vec::new(),
             init_fns: Vec::new(),
             image_base: ImageBase::Library(Arc::new(platform::library_name(library))),
-            excepted_base: excepted_base,
+            expected_base: expected_base,
         }
     }
 
@@ -381,20 +381,20 @@ impl<'a> ActivePatcher<'a> {
     /// the caller is responsible for taking care of the memory being writable.
     ///
     /// Call methods of the returned `ModulePatcher` to apply hooks.
-    /// Applying constant/nop patches requires specifying `excepted_base`, otherwise it can
+    /// Applying constant/nop patches requires specifying `expected_base`, otherwise it can
     /// be 0.
     pub fn patch_memory<'b>(
         &'b mut self,
         write: *mut c_void,
         execute: *mut c_void,
-        excepted_base: usize
+        expected_base: usize
     ) -> ModulePatcher<'a, 'b> {
         ModulePatcher {
             parent: self,
             patches: Vec::new(),
             init_fns: Vec::new(),
             image_base: ImageBase::Memory { write, exec: execute },
-            excepted_base: excepted_base,
+            expected_base: expected_base,
         }
     }
 
@@ -822,7 +822,7 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
             variant: ModulePatchType::Data(ReplacingPatch {
                 data: mem.iter().cloned().collect(),
                 backup_buf: std::iter::repeat(0).take(mem.len()).collect(),
-                address: address - self.excepted_base,
+                address: address - self.expected_base,
             }),
             image_base: self.image_base.clone(),
             active: false,
