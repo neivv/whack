@@ -26,6 +26,15 @@ pub trait AddressHook {
     fn wrapper_assembler(target: *const u8) -> ::platform::HookWrapAssembler;
 }
 
+pub trait HookDeclClosure<Callback>: HookDecl {
+    fn write_target_objects(target: Callback) -> Box<[u8]>;
+}
+
+pub trait HookDecl {
+    // For inline hooks, that is
+    fn wrapper_assembler_inline(target: *const u8) -> ::platform::HookWrapAssembler;
+}
+
 pub trait ExportHookClosure<Callback>: ExportHook {
     fn default_export() -> ::Export<'static>;
     fn write_target_objects(target: Callback) -> Box<[u8]>;
@@ -102,6 +111,61 @@ macro_rules! whack_export {
 }
 
 #[macro_export]
+macro_rules! whack_hook_decls {
+    ($($name:ident($($args:tt)*) -> $ret:ty;)*) => {
+        $(whack_name_args!([hook_decl, $name, $ret], [$([$args])*]);)*
+    };
+    ($($name:ident($($args:tt)*);)*) => {
+        $(whack_name_args!([hook_decl, $name, ()], [$([$args])*]);)*
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! whack_impl_hook_decl {
+    ($name:ident, $ret:ty, $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
+        pub struct $name;
+        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static>
+            $crate::HookDeclClosure<T> for $name
+        {
+            whack_hook_wrapper_impl!($ret, $([$aty])*);
+        }
+
+        impl $crate::HookDecl for $name
+        {
+            fn wrapper_assembler_inline(target: *const u8)
+                -> $crate::platform::HookWrapAssembler
+            {
+                let in_wrap_addr = $name::in_wrap_inline as *const u8;
+                $crate::platform::HookWrapAssembler::new(in_wrap_addr, target, false)
+            }
+        }
+
+        impl $name {
+            // caller -> assembly wrap -> in_wrap -> hook.
+            // If the hook wishes to call original function,
+            // then it'll go hook -> out_wrap -> assembly -> original.
+            // Orig is pointer to the assembly wrapper which calls original function,
+            // Real is pointer to the fat pointer of hook Fn(...).
+            extern fn in_wrap_inline(
+                $($an: $aty,)*
+                orig: extern fn(*mut $crate::platform::InlineCallCtx, $($aty),*) -> $ret,
+                real: *const *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret,
+                params: *mut $crate::platform::InlineCallCtx,
+            ) -> () {
+                let real: &Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret = unsafe { &**real };
+                real($($an,)* &|$($an),*| {
+                    unsafe {
+                        (*params).init_stack_copy_size();
+                    }
+                    orig(params, $($an),*);
+                });
+            }
+        }
+    }
+}
+
+#[macro_export]
 macro_rules! whack_hooks {
     (stdcall, $base:expr, $($addr:expr => $name:ident($($args:tt)*) $(-> $ret:ty)*;)*) => {
         $(whack_address_hook!(stdcall, $base, $addr, pub $name($($args)*) $(-> $ret)*);)*
@@ -169,10 +233,10 @@ macro_rules! whack_addr_hook_common {
                     // "Memory leak", should return (*const u8, Patch)
                     unsafe { (*Box::into_raw(data)).as_ptr() }
                 };
-                let (wrapper, _, _) = H::wrapper_assembler(target_closure)
+                let (entry, _, _) = H::wrapper_assembler(target_closure)
                     .generate_wrapper_code($crate::OrigFuncCallback::None)
-                    .write_wrapper(None, exec_heap, None);
-                wrapper as *const u8
+                    .write_wrapper(None, None, None, exec_heap, None);
+                entry.wrapper
             }
 
             let target = move |$($an,)* _: &Fn($($aty),*) -> $ret| {
@@ -563,6 +627,15 @@ macro_rules! whack_name_args_recurse {
     (yup, $imp_stack_pos:expr, [addr, $($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
      [$($rest:ident),*]) => {
         whack_impl_addr_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
+    };
+    (nope, $imp_stack_pos:expr, [hook_decl, $($other:tt),*],
+     [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],
+     [$($rest:ident),*], [$($rest_loc:ident($rest_pos:expr)),*]) => {
+        whack_impl_hook_decl!($($other,)* $([$oki @ $okl($okp): $okt])*);
+    };
+    (yup, $imp_stack_pos:expr, [hook_decl, $($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
+     [$($rest:ident),*]) => {
+        whack_impl_hook_decl!($($other,)* $([$oki @ $okl($okp): $okt])*);
     };
     (nope, $imp_stack_pos:expr, [imp, $($other:tt),*],
      [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],

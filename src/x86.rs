@@ -1,10 +1,12 @@
+use std::cell::RefCell;
 use std::mem;
 use std::ptr;
 use std::slice;
+use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
 use std::io::Write;
 
 use lde::{self, InsnSet};
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{LE, LittleEndian, ReadBytesExt, WriteBytesExt};
 use smallvec::SmallVec;
 
 use insertion_sort;
@@ -20,6 +22,72 @@ pub unsafe fn write_jump_to_ptr(from: *mut u8, to_ptr: *const *const u8) {
     out.write(&[0xff, 0x25]).unwrap();
     out.write_u32::<LittleEndian>(to_ptr as u32).unwrap();
     assert_eq!(out.len(), 0);
+}
+
+#[repr(C)]
+pub struct InlineCallCtx {
+    stack_copy_size: usize,
+    regs: [usize; 8],
+}
+
+impl InlineCallCtx {
+    pub fn init_stack_copy_size(&mut self) {
+        let ebp = self.regs[5];
+        let esp = self.regs[4];
+        let val = ebp.wrapping_sub(esp).wrapping_add(8);
+        self.stack_copy_size = if val > 0x20 && val < 0x2000 {
+            val
+        } else {
+            0x200
+        };
+    }
+}
+
+thread_local! {
+    static TLS: RefCell<Vec<Vec<*const InlineCallCtx>>> = RefCell::new(Vec::new());
+}
+
+fn new_inline_tls_id() -> usize {
+    static TLS_IDS: AtomicUsize = ATOMIC_USIZE_INIT;
+    TLS_IDS.fetch_add(1, Ordering::SeqCst)
+}
+
+extern fn get_inline_tls(id: usize) -> *const InlineCallCtx {
+    TLS.with(|x| {
+        let val = x.borrow();
+        let ptr = val[id].last().cloned().unwrap_or_else(|| ptr::null());
+        ptr
+    })
+}
+
+extern fn set_inline_tls(ctx: *const InlineCallCtx, id: usize) {
+    TLS.with(|x| {
+        let mut val = x.borrow_mut();
+        while val.len() <= id {
+            val.push(Vec::new());
+        }
+        (val)[id].push(ctx);
+    });
+}
+
+extern fn inline_tls_push_disable(id: usize) {
+    set_inline_tls(ptr::null(), id);
+}
+
+extern fn inline_tls_pop_enabled(id: usize) {
+    TLS.with(|x| {
+        let mut val = x.borrow_mut();
+        let prev = val[id].pop().unwrap();
+        assert!(prev != ptr::null());
+    });
+}
+
+extern fn inline_tls_pop_disable(id: usize) {
+    TLS.with(|x| {
+        let mut val = x.borrow_mut();
+        let prev = val[id].pop().unwrap();
+        assert!(prev == ptr::null());
+    });
 }
 
 fn is_preserved_reg(reg: u8) -> bool {
@@ -49,15 +117,22 @@ pub struct FuncAssembler {
 }
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
+/// Defines arguments for hooks where the arguments weren't defined statically.
 pub enum Location {
+    /// Register, 0 = eax/rax, 1 = ecx/rcx, etc.
     Register(u8),
+    /// Offset from the stack pointer. Stack(0) would be return address on hooks at function
+    /// entry, Stack(0) would be the first argument.
     Stack(i16),
+    /// Alternative to Stack, uses offset instead of arg id.
+    Esp(i16),
 }
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub enum AsmValue {
     Register(u8),
     Stack(i16),
+    EaxPtr(i16),
     Undecided,
     Constant(u32),
 }
@@ -67,6 +142,7 @@ impl Location {
         match *self {
             Location::Register(x) => Some(x),
             Location::Stack(_) => None,
+            Location::Esp(_) => None,
         }
     }
 
@@ -74,6 +150,7 @@ impl Location {
         match *self {
             Location::Register(_) => None,
             Location::Stack(x) => Some(x),
+            Location::Esp(x) => Some((x - 4) / 4),
         }
     }
 }
@@ -83,6 +160,7 @@ impl AsmValue {
         match *loc {
             Location::Register(x) => AsmValue::Register(x),
             Location::Stack(x) => AsmValue::Stack(x),
+            Location::Esp(x) => AsmValue::Stack((x - 4) / 4),
         }
     }
 }
@@ -106,7 +184,13 @@ impl HookWrapAssembler {
     /// Returns the buffer and possible offset for fixup original ptr for import hooks.
     pub fn generate_wrapper_code(&self, orig: OrigFuncCallback) -> HookWrapCode {
         let mut buffer = AssemblerBuf::new();
-        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, orig);
+        let tls_id = match orig {
+            OrigFuncCallback::Inline(..) => new_inline_tls_id() as u32,
+            _ => !0,
+        };
+        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, tls_id, orig);
+        let mut exit_wrapper_offset = 0;
+        let mut parent_hook_offset = 0;
         // Only write out wrappers when needed
         let delayed_out = match orig {
             OrigFuncCallback::Overwritten(orig) => {
@@ -115,18 +199,48 @@ impl HookWrapAssembler {
             OrigFuncCallback::ImportHook => {
                 self.write_out_wrapper(&mut buffer, out_wrapper_pos, None)
             }
+            OrigFuncCallback::Inline(entry, exit, parent) => {
+                self.write_inline_out_wrapper(&mut buffer, out_wrapper_pos, entry);
+                exit_wrapper_offset = buffer.len();
+                self.write_inline_exit_hook(&mut buffer, tls_id, exit);
+                if parent != ptr::null() {
+                    parent_hook_offset = buffer.len();
+                    self.write_inline_parent_hook(&mut buffer, tls_id, parent);
+                }
+                !0
+            }
             OrigFuncCallback::None | OrigFuncCallback::Hook(_) => !0,
         };
         HookWrapCode {
             buf: buffer,
             import_fixup_offset: delayed_out,
+            exit_wrapper_offset,
+            parent_hook_offset,
         }
     }
 
     // Returns fixup pos for out_wrapper's address
-    fn write_in_wrapper(&self, buffer: &mut AssemblerBuf, orig: OrigFuncCallback) -> AsmFixupPos {
-        if let OrigFuncCallback::Hook(_) = orig {
-            buffer.pushad();
+    fn write_in_wrapper(
+        &self,
+        buffer: &mut AssemblerBuf,
+        tls_id: u32,
+        orig: OrigFuncCallback,
+    ) -> AsmFixupPos {
+        match orig {
+            OrigFuncCallback::Hook(_) => {
+                buffer.pushad();
+            }
+            OrigFuncCallback::Inline(..) => {
+                buffer.pushad();
+                // It'll also alloc space for InlineCallCtx::stack_copy_size with this push
+                buffer.push(AsmValue::Constant(tls_id));
+                buffer.push(AsmValue::Register(4));
+                buffer.call(AsmValue::Constant(set_inline_tls as u32));
+                buffer.stack_add(8);
+                buffer.popad();
+                buffer.stack_sub(0x28);
+            }
+            _ => (),
         }
         buffer.push(AsmValue::Constant(self.target as u32));
         let out_wrapper_pos = buffer.fixup_position();
@@ -135,31 +249,213 @@ impl HookWrapAssembler {
             buffer.push(AsmValue::from_loc(val));
         }
         buffer.call(AsmValue::Constant(self.rust_in_wrapper as u32));
-        buffer.stack_add((self.args.len() + 2) * 4);
-        if let OrigFuncCallback::Hook(orig) = orig {
-            buffer.popad();
-            unsafe {
-                let len = copy_instruction_length(orig, JUMP_INS_LEN);
-                buffer.copy_instructions(orig, len);
-                buffer.jump(AsmValue::Constant(orig as u32 + len as u32));
-            }
+        if let OrigFuncCallback::Inline(..) = orig {
+            buffer.stack_add((self.args.len() + 3) * 4);
         } else {
-            if self.stdcall {
-                let stack_arg_count = self.args.iter().filter_map(|x| x.stack_to_opt()).count();
-                buffer.ret(stack_arg_count * 4);
-            } else {
-                buffer.ret(0);
+            buffer.stack_add((self.args.len() + 2) * 4);
+        }
+        match orig {
+            OrigFuncCallback::Hook(orig) => {
+                buffer.popad();
+                unsafe {
+                    let len = copy_instruction_length(orig, JUMP_INS_LEN);
+                    buffer.copy_instructions(orig, len);
+                    buffer.jump(AsmValue::Constant(orig as u32 + len as u32));
+                }
+            }
+            OrigFuncCallback::Inline(_, exit, _) => {
+                buffer.push(AsmValue::Constant(tls_id));
+                buffer.call(AsmValue::Constant(inline_tls_pop_enabled as u32));
+                buffer.stack_add(8);
+                buffer.popad();
+                unsafe {
+                    let len = copy_instruction_length(exit, JUMP_INS_LEN);
+                    buffer.copy_instructions(exit, len);
+                    buffer.jump(AsmValue::Constant(exit as u32 + len as u32));
+                }
+            }
+            _ => {
+                if self.stdcall {
+                    let stack_arg_count = self.args.iter()
+                        .filter_map(|x| x.stack_to_opt())
+                        .count();
+                    buffer.ret(stack_arg_count * 4);
+                } else {
+                    buffer.ret(0);
+                }
             }
         }
         out_wrapper_pos
     }
 
+    fn write_inline_out_wrapper(
+        &self,
+        buffer: &mut AssemblerBuf,
+        out_wrapper_pos: AsmFixupPos,
+        entry: *const u8,
+    ) {
+        buffer.reset_stack_offset();
+        buffer.fixup_to_position(out_wrapper_pos);
+        buffer.push(AsmValue::Register(3));
+        buffer.push(AsmValue::Register(5));
+        buffer.push(AsmValue::Register(6));
+        buffer.push(AsmValue::Register(7));
+        buffer.mov(AsmValue::Register(0), AsmValue::Stack(0));
+        buffer.mov(AsmValue::Register(1), AsmValue::EaxPtr(0));
+        buffer.stack_sub_reg(1);
+        let pushad_offset = 0x4;
+        buffer.mov(AsmValue::Register(6), AsmValue::EaxPtr(pushad_offset  + 0xc));
+        buffer.mov(AsmValue::Register(7), AsmValue::Register(4));
+        buffer.buf.write(&[0xf3, 0xa4]).unwrap();
+
+        let mut stack_args: SmallVec<[_; 8]> = self.args
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, x)| x.stack_to_opt().map(|x| (pos, x)))
+            .collect();
+
+        insertion_sort::sort_by_key(&mut stack_args, |&(_, target_pos)| target_pos);
+        let stack_off = (1u8..8).filter(|&x| x != 4)
+            .find(|&reg| !self.args.iter().filter_map(|x| x.reg_to_opt()).any(|x| x == reg))
+            .expect("No free reg");
+        let second_scratch = match stack_off {
+            2 => 1,
+            _ => 2,
+        };
+        buffer.mov(AsmValue::Register(stack_off), AsmValue::EaxPtr(0));
+        for (in_pos, out_pos) in stack_args {
+            buffer.mov_reg_offset(
+                AsmValue::Register(second_scratch),
+                AsmValue::Stack(in_pos as i16 + 1),
+                stack_off,
+            );
+            // Mov [esp + out_pos * 4], edx
+            buffer.buf.write(
+                &[0x89, 0x44 + second_scratch * 8, 0xe4, out_pos as u8 * 4 + 4]
+            ).unwrap();
+        }
+
+        for reg in (1u8..8).filter(|&x| x != 4 && x != stack_off) {
+            buffer.mov(
+                AsmValue::Register(reg),
+                AsmValue::EaxPtr(pushad_offset + 0x1c - reg as i16 * 4),
+            );
+        }
+        let reg_args = self.args
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, x)| x.reg_to_opt().map(|x| (pos, x)));
+        buffer.push(AsmValue::Register(0));
+        for (pos, reg) in reg_args {
+            buffer.mov_reg_offset(
+                AsmValue::Register(reg),
+                AsmValue::Stack(pos as i16 + 1),
+                stack_off
+            );
+        }
+        // Restore the stack_off register, can't use EaxPtr if it was overwritten already.
+        // mov stack_off, [stack_off + offset]
+        buffer.pop(AsmValue::Register(stack_off));
+        buffer.buf.write(
+            &[0x8b, 0x40 + 9 * stack_off, pushad_offset as u8 + 0x1c - stack_off * 4]
+        ).unwrap();
+        if !self.args.iter().any(|&x| x == Location::Register(0)) {
+            buffer.mov(AsmValue::Register(0), AsmValue::EaxPtr(pushad_offset + 0x1c));
+        }
+        unsafe {
+            let len = copy_instruction_length(entry, JUMP_INS_LEN);
+            buffer.copy_instructions(entry, len);
+            buffer.jump(AsmValue::Constant(entry as u32 + len as u32));
+        }
+    }
+
+    fn write_inline_exit_hook(
+        &self,
+        buffer: &mut AssemblerBuf,
+        tls_id: u32,
+        exit: *const u8,
+    ) {
+        buffer.reset_stack_offset();
+        buffer.pushfd();
+        buffer.push(AsmValue::Register(0));
+        buffer.push(AsmValue::Register(1));
+        buffer.push(AsmValue::Register(2));
+        buffer.push(AsmValue::Constant(tls_id));
+        buffer.call(AsmValue::Constant(get_inline_tls as u32));
+        buffer.pop(AsmValue::Register(1));
+        // Doing rest like this due to the jump
+        buffer.buf.write(&[
+            0x85, 0xc0,
+            0x74, 0x0c,
+            0x8b, 0x08,
+            0x83, 0xc4, 0x10,
+            0x01, 0xcc,
+            0x5f,
+            0x5e,
+            0x5d,
+            0x5b,
+            0xc3,
+            // was_not_returing_from_orig
+            0x5a,
+            0x59,
+            0x58,
+            0x9d,
+        ]).unwrap();
+        unsafe {
+            let len = copy_instruction_length(exit, JUMP_INS_LEN);
+            buffer.copy_instructions(exit, len);
+            buffer.jump(AsmValue::Constant(exit as u32 + len as u32));
+        }
+    }
+
+    fn write_inline_parent_hook(
+        &self,
+        buffer: &mut AssemblerBuf,
+        tls_id: u32,
+        parent: *const u8,
+    ) {
+        buffer.reset_stack_offset();
+        // Hooks the parent entry, calling pushing a "disable" to TLS stack on entry
+        // and popping on exit.
+        buffer.pushad();
+        buffer.push(AsmValue::Constant(tls_id));
+        buffer.call(AsmValue::Constant(inline_tls_push_disable as u32));
+        buffer.pop(AsmValue::Register(0));
+        buffer.popad();
+        for i in (0..12).rev() {
+            buffer.push(AsmValue::Stack(i))
+        }
+        let return_addr = buffer.fixup_position();
+        buffer.push(AsmValue::Undecided);
+        unsafe {
+            let len = copy_instruction_length(parent, JUMP_INS_LEN);
+            buffer.copy_instructions(parent, len);
+            buffer.jump(AsmValue::Constant(parent as u32 + len as u32));
+        }
+        buffer.fixup_to_position(return_addr);
+        buffer.pushad();
+        buffer.push(AsmValue::Constant(tls_id));
+        buffer.call(AsmValue::Constant(inline_tls_pop_disable as u32));
+        buffer.pop(AsmValue::Register(0));
+        buffer.popad();
+        buffer.stack_add(12 * 4);
+        if self.stdcall {
+            let stack_arg_count = self.args.iter()
+                .filter_map(|x| x.stack_to_opt())
+                .count();
+            buffer.ret(stack_arg_count * 4);
+        } else {
+            buffer.ret(0);
+        }
+    }
+
     // Returns offset to fix delayed out address
-    fn write_out_wrapper(&self,
-                         buffer: &mut AssemblerBuf,
-                         out_wrapper_pos: AsmFixupPos,
-                         orig: Option<*const u8>,
-                        ) -> usize {
+    fn write_out_wrapper(
+        &self,
+        buffer: &mut AssemblerBuf,
+        out_wrapper_pos: AsmFixupPos,
+        orig: Option<*const u8>,
+    ) -> usize {
         let mut preserved_regs: SmallVec<[u8; 8]> = SmallVec::new();
         buffer.reset_stack_offset();
         buffer.fixup_to_position(out_wrapper_pos);
@@ -304,6 +600,9 @@ impl FuncAssembler {
 pub struct HookWrapCode {
     buf: AssemblerBuf,
     import_fixup_offset: usize,
+    // If buf has an exit hook for inlined hooks as well, this is the offset to it.
+    exit_wrapper_offset: usize,
+    parent_hook_offset: usize,
 }
 
 impl HookWrapCode {
@@ -317,22 +616,42 @@ impl HookWrapCode {
     /// relative jumps don't work with (rather rare use case of) aliasing view patching.
     /// The original instructions will be copied to memory right before the wrapper,
     /// to be used when patch is disabled.
+    ///
+    /// Also now returns exit hook for inline hooks.
     pub fn write_wrapper(
         &self,
-        orig: Option<*const u8>,
+        entry: Option<*const u8>,
+        exit: Option<*const u8>,
+        inline_parent_entry: Option<*const u8>,
         heap: &mut ExecutableHeap,
         import_fixup: Option<*const u8>,
-    ) -> (*const u8, usize, *const *const u8) {
-        let orig_ins_len = match orig {
-            Some(orig) => { unsafe { copy_instruction_length(orig, JUMP_INS_LEN) } },
-            None => 0,
-        };
-        let wrapper_len = self.buf.len() + orig_ins_len + 4;
+    ) -> (::GeneratedHook, Option<::GeneratedHook>, Option<::GeneratedHook>) {
+        let ins_len = |x| { unsafe { copy_instruction_length(x, JUMP_INS_LEN) } };
+
+        let entry_orig_ins_len = entry.map(&ins_len).unwrap_or(0);
+        let exit_orig_ins_len = exit.map(&ins_len).unwrap_or(0);
+        let parent_orig_ins_len = inline_parent_entry.map(&ins_len).unwrap_or(0);
+
+        let wrapper_len =
+            self.buf.len() + entry_orig_ins_len + exit_orig_ins_len + parent_orig_ins_len + 0xc;
         let data = heap.allocate(wrapper_len);
-        if let Some(orig) = orig {
-            unsafe { ptr::copy_nonoverlapping(orig, data, orig_ins_len) };
+        let entry_orig_ins_ptr = data;
+        if let Some(entry) = entry {
+            unsafe { ptr::copy_nonoverlapping(entry, entry_orig_ins_ptr, entry_orig_ins_len) };
         }
-        let wrapper = unsafe { data.offset(orig_ins_len as isize) };
+        let exit_orig_ins_ptr = unsafe { entry_orig_ins_ptr.offset(entry_orig_ins_len as isize) };
+        if let Some(exit) = exit {
+            unsafe { ptr::copy_nonoverlapping(exit, exit_orig_ins_ptr, exit_orig_ins_len) };
+        }
+        let parent_orig_ins_ptr = unsafe {
+            exit_orig_ins_ptr.offset(exit_orig_ins_len as isize)
+        };
+        if let Some(parent) = inline_parent_entry {
+            unsafe { ptr::copy_nonoverlapping(parent, parent_orig_ins_ptr, parent_orig_ins_len) };
+        }
+        let wrapper = unsafe { parent_orig_ins_ptr.offset(parent_orig_ins_len as isize) };
+        let exit_wrapper = unsafe { wrapper.offset(self.exit_wrapper_offset as isize) };
+        let parent_hook = unsafe { wrapper.offset(self.parent_hook_offset as isize) };
         self.buf.write(wrapper);
         if let Some(fixup) = import_fixup {
             unsafe {
@@ -340,12 +659,41 @@ impl HookWrapCode {
                 *(wrapper.offset(offset) as *mut usize) = fixup as usize;
             }
         }
-        let wrapper_ptr = unsafe {
+        let entry_pointer_to_wrapper = unsafe {
             let ptr = wrapper.offset(self.buf.len() as isize) as *mut *const u8;
             *ptr = wrapper;
             ptr
         };
-        (wrapper, orig_ins_len, wrapper_ptr)
+        let exit_pointer_to_wrapper = unsafe {
+            let ptr = wrapper.offset(self.buf.len() as isize + 4) as *mut *const u8;
+            *ptr = exit_wrapper;
+            ptr
+        };
+        let parent_pointer_to_wrapper = unsafe {
+            let ptr = wrapper.offset(self.buf.len() as isize + 8) as *mut *const u8;
+            *ptr = parent_hook;
+            ptr
+        };
+        assert_eq!(parent_pointer_to_wrapper as usize + 4, data as usize + wrapper_len);
+        let entry = ::GeneratedHook {
+            wrapper,
+            orig_ins_len: entry_orig_ins_len,
+            orig_ins: entry_orig_ins_ptr,
+            pointer_to_wrapper: entry_pointer_to_wrapper,
+        };
+        let exit = exit.map(|_| ::GeneratedHook {
+            wrapper: exit_wrapper,
+            orig_ins_len: exit_orig_ins_len,
+            orig_ins: exit_orig_ins_ptr,
+            pointer_to_wrapper: exit_pointer_to_wrapper,
+        });
+        let parent = inline_parent_entry.map(|_| ::GeneratedHook {
+            wrapper: parent_hook,
+            orig_ins_len: parent_orig_ins_len,
+            orig_ins: parent_orig_ins_ptr,
+            pointer_to_wrapper: parent_pointer_to_wrapper,
+        });
+        (entry, exit, parent)
     }
 }
 
@@ -361,7 +709,8 @@ pub struct AsmFixupPos(usize);
 impl AssemblerBuf {
     pub fn new() -> AssemblerBuf {
         AssemblerBuf {
-            buf: Vec::with_capacity(128),
+            // TODO INSTRUCTION COPYING BREAKS IF THE VECTOR IS REALLOCATED
+            buf: Vec::with_capacity(512),
             fixups: SmallVec::new(),
             stack_offset: 0,
         }
@@ -386,21 +735,25 @@ impl AssemblerBuf {
     }
 
     pub unsafe fn copy_instructions(&mut self, source: *const u8, amt: usize) {
-        self.buf.reserve(amt);
-        copy_instructions(source, self.buf.as_mut_ptr().offset(self.buf.len() as isize), amt);
-        let new_len = self.buf.len() + amt;
-        self.buf.set_len(new_len);
+        // TODO HAVE IMAGINED BASE BE IN SELF
+        let ptr = self.buf.as_ptr();
+        copy_instructions(source, &mut self.buf, ptr, amt);
     }
 
     fn write(&self, out: *mut u8) {
         let diff = out as usize;
         unsafe {
-            copy_instructions(self.buf.as_ptr(), out, self.buf.len());
+            // TODO USE IMAGINED BASE
+            copy_instructions_ignore_shortjmp(self.buf.as_ptr(), out, self.buf.len());
             for &fixup in self.fixups.iter() {
                 let prev = (&self.buf[fixup .. fixup + 4]).read_u32::<LittleEndian>().unwrap();
                 *(out.offset(fixup as isize) as *mut u32) = prev.wrapping_add(diff as u32);
             }
         }
+    }
+
+    pub fn pushfd(&mut self) {
+        self.buf.write_u8(0x9c).unwrap();
     }
 
     pub fn push(&mut self, val: AsmValue) {
@@ -432,6 +785,7 @@ impl AssemblerBuf {
                     }
                 }
             }
+            AsmValue::EaxPtr(_) => unimplemented!(),
         }
         self.stack_offset += 4;
     }
@@ -443,7 +797,7 @@ impl AssemblerBuf {
             }
             _ => unimplemented!(),
         }
-        self.stack_offset += 4;
+        self.stack_offset -= 4;
     }
 
     pub fn pushad(&mut self) {
@@ -478,6 +832,30 @@ impl AssemblerBuf {
                     }
                 }
             }
+            (AsmValue::Register(to), AsmValue::EaxPtr(offset)) => {
+                self.buf.write(&[0x8b, 0x40 + to * 8, offset as u8]).unwrap();
+            }
+            (_, _) => unimplemented!(),
+        }
+    }
+
+    pub fn mov_reg_offset(&mut self, to: AsmValue, from: AsmValue, reg: u8) {
+        match (to, from) {
+            (AsmValue::Register(to), AsmValue::Stack(from)) => {
+                let offset = (from as i32 * 4) + 4 + self.stack_offset;
+                match offset {
+                    0 => {
+                        self.buf.write(&[0x8b, 0x4 + to * 8, 0x04 + reg * 8]).unwrap();
+                    }
+                    x if x < 0x80 => {
+                        self.buf.write(&[0x8b, 0x44 + to * 8, 0x04 + reg * 8, x as u8]).unwrap();
+                    }
+                    x => {
+                        self.buf.write(&[0x8b, 0x84 + to * 8, 0x04 + reg * 8]).unwrap();
+                        self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
+                    }
+                }
+            }
             (_, _) => unimplemented!(),
         }
     }
@@ -508,6 +886,11 @@ impl AssemblerBuf {
             }
         }
         self.stack_offset += value as i32;
+    }
+
+    // NOTE: WONT UPDATE STACK OFFSET BECAUSE IT CANT
+    pub fn stack_sub_reg(&mut self, register: u8) {
+        self.buf.write(&[0x29, 0xc4 + register * 8]).unwrap();
     }
 
     pub fn ret(&mut self, stack_pop: usize) {
@@ -567,7 +950,12 @@ pub unsafe fn copy_instruction_length(ins: *const u8, min_length: usize) -> usiz
     sum
 }
 
-unsafe fn copy_instructions(src: *const u8, mut dst: *mut u8, min_length: usize) {
+// Assumes that short jumps won't need to be changed
+unsafe fn copy_instructions_ignore_shortjmp(
+    src: *const u8,
+    mut dst: *mut u8,
+    min_length: usize,
+) {
     let mut len = min_length as isize;
     for (opcode, _) in lde::x86::lde(slice::from_raw_parts(src, min_length + 32), 0) {
         if len <= 0 {
@@ -576,17 +964,92 @@ unsafe fn copy_instructions(src: *const u8, mut dst: *mut u8, min_length: usize)
         let ins_len = opcode.len() as isize;
         // Relative jumps need to be handled differently
         match opcode[0] {
+            0xf => match opcode[1] {
+                0x80 ... 0x8f => {
+                    ptr::copy_nonoverlapping(opcode.as_ptr(), dst, 6);
+                    let diff = (dst as usize).wrapping_sub(opcode.as_ptr() as usize);
+                    let value = *(dst.offset(2) as *mut usize);
+                    *(dst.offset(2) as *mut usize) = value.wrapping_sub(diff);
+                }
+                _ => ptr::copy_nonoverlapping(opcode.as_ptr(), dst, ins_len as usize),
+            },
             0xe8 | 0xe9 => {
                 assert!(ins_len == 5);
                 ptr::copy_nonoverlapping(opcode.as_ptr(), dst, 5);
                 let diff = (dst as usize).wrapping_sub(opcode.as_ptr() as usize);
                 let value = *(dst.offset(1) as *mut usize);
                 *(dst.offset(1) as *mut usize) = value.wrapping_sub(diff);
-
             }
             _ => ptr::copy_nonoverlapping(opcode.as_ptr(), dst, ins_len as usize),
         }
         dst = dst.offset(ins_len);
+        len -= ins_len;
+    }
+    panic!("Could not disassemble {:x}", src as usize);
+}
+
+// Dst_base is the address at which the code is *imagined* to be at, so it won't matter if
+// the vector is reallocated.
+//
+// (The rest of the code doesn't actually work with that yet though)
+unsafe fn copy_instructions(
+    src: *const u8,
+    dst: &mut Vec<u8>,
+    dst_base: *const u8,
+    min_length: usize,
+) {
+    let mut len = min_length as isize;
+    for (opcode, _) in lde::x86::lde(slice::from_raw_parts(src, min_length + 32), 0) {
+        if len <= 0 {
+            return;
+        }
+        let ins_len = opcode.len() as isize;
+        match opcode[0] {
+            0x0f => match opcode[1] {
+                // Long cond jump
+                0x80 ... 0x8f => {
+                    let diff = (dst_base as usize + dst.len())
+                        .wrapping_sub(opcode.as_ptr() as usize);
+                    dst.push(0xf);
+                    dst.push(opcode[1]);
+                    let offset = (&opcode[2..]).read_u32::<LE>().unwrap();
+                    dst.write_u32::<LE>(offset.wrapping_sub(diff as u32)).unwrap();
+                }
+                _ => {
+                    let slice = slice::from_raw_parts(opcode.as_ptr(), ins_len as usize);
+                    dst.extend_from_slice(slice);
+                }
+            },
+            // Short cond jump
+            0x70 ... 0x7f => {
+                let diff = (dst_base as usize + dst.len() + 6)
+                    .wrapping_sub(opcode.as_ptr() as usize + 2);
+                let offset = opcode[1] as i8 as u32;
+                dst.push(0xf);
+                dst.push(opcode[0] + 0x10);
+                dst.write_u32::<LE>(offset.wrapping_sub(diff as u32)).unwrap();
+            }
+            0xe8 | 0xe9 => {
+                assert!(ins_len == 5);
+                let diff = (dst_base as usize + dst.len()).wrapping_sub(opcode.as_ptr() as usize);
+                dst.push(opcode[0]);
+                let offset = (&opcode[1..]).read_u32::<LE>().unwrap();
+                dst.write_u32::<LE>(offset.wrapping_sub(diff as u32)).unwrap();
+            }
+            // Short jump
+            0xeb => {
+                let diff = (dst_base as usize + dst.len() + 5)
+                    .wrapping_sub(opcode.as_ptr() as usize + 2);
+                let offset = opcode[1] as i8 as u32;
+                dst.push(0xe9);
+                dst.push(opcode[0] + 0x10);
+                dst.write_u32::<LE>(offset.wrapping_sub(diff as u32)).unwrap();
+            }
+            _ => {
+                let slice = slice::from_raw_parts(opcode.as_ptr(), ins_len as usize);
+                dst.extend_from_slice(slice);
+            }
+        }
         len -= ins_len;
     }
     panic!("Could not disassemble {:x}", src as usize);

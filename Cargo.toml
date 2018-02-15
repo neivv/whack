@@ -4,7 +4,7 @@ name = "whack"
 version = "0.2.0"
 
 [dependencies]
-byteorder = "1.1"
+byteorder = "1.2"
 lde = "0.2.0"
 libc = "0.2"
 rust_win32error = "0.8"

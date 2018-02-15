@@ -22,6 +22,25 @@ pub unsafe fn write_jump_to_ptr(from: *mut u8, to_ptr: *const *const u8) {
     *(from.offset(6) as *mut *const u8) = *to_ptr;
 }
 
+#[repr(C)]
+pub struct InlineCallCtx {
+    stack_copy_size: usize,
+    regs: [usize; 8],
+}
+
+impl InlineCallCtx {
+    pub fn init_stack_copy_size(&mut self) {
+        let rbp = self.regs[5];
+        let rsp = self.regs[4];
+        let val = rbp.wrapping_sub(rsp).wrapping_add(0x40);
+        self.stack_copy_size = if val > 0x20 && val < 0x2000 {
+            val
+        } else {
+            0x200
+        };
+    }
+}
+
 fn is_preserved_reg(reg: u8) -> bool {
     match reg {
         0 | 1 | 2 | 8 | 9 | 10 | 11 => false,
@@ -141,6 +160,9 @@ impl HookWrapAssembler {
                 self.write_out_wrapper(&mut buffer, out_wrapper_pos, None)
             }
             OrigFuncCallback::None | OrigFuncCallback::Hook(_) => None,
+            OrigFuncCallback::Inline(..) => {
+                unimplemented!();
+            }
         };
         buffer.align(16);
         let const_offsets = buffer.write_fixups();
@@ -149,6 +171,7 @@ impl HookWrapAssembler {
             buf: buffer,
             import_fixup_offset: import_fixup_offset.map(|x| const_offsets.to_offset(x))
                 .unwrap_or(0),
+            exit_wrapper_offset: 0,
         }
     }
 
@@ -384,6 +407,7 @@ impl FuncAssembler {
 pub struct HookWrapCode {
     buf: AssemblerBuf,
     import_fixup_offset: usize,
+    exit_wrapper_offset: usize,
 }
 
 impl HookWrapCode {
@@ -399,20 +423,29 @@ impl HookWrapCode {
     /// to be used when patch is disabled.
     pub fn write_wrapper(
         &self,
-        orig: Option<*const u8>,
+        entry: Option<*const u8>,
+        exit: Option<*const u8>,
+        _inline_parent_entry: Option<*const u8>,
         heap: &mut ExecutableHeap,
         import_fixup: Option<*const u8>,
-    ) -> (*const u8, usize, *const *const u8) {
-        let orig_ins_len = match orig {
-            Some(orig) => { unsafe { ins_len(orig, JUMP_INS_LEN) } },
-            None => 0,
-        };
-        let wrapper_len = self.buf.len() + orig_ins_len + 8;
+    ) -> (::GeneratedHook, Option<::GeneratedHook>, Option<::GeneratedHook>) {
+        let ins_len = |x| { unsafe { ins_len(x, JUMP_INS_LEN) } };
+
+        let entry_orig_ins_len = entry.map(&ins_len).unwrap_or(0);
+        let exit_orig_ins_len = exit.map(&ins_len).unwrap_or(0);
+
+        let wrapper_len = self.buf.len() + entry_orig_ins_len + exit_orig_ins_len + 16;
         let data = heap.allocate(wrapper_len);
-        if let Some(orig) = orig {
-            unsafe { ptr::copy_nonoverlapping(orig, data, orig_ins_len) };
+        let entry_orig_ins_ptr = data;
+        if let Some(entry) = entry {
+            unsafe { ptr::copy_nonoverlapping(entry, entry_orig_ins_ptr, entry_orig_ins_len) };
         }
-        let wrapper = unsafe { data.offset(orig_ins_len as isize) };
+        let exit_orig_ins_ptr = unsafe { entry_orig_ins_ptr.offset(entry_orig_ins_len as isize) };
+        if let Some(exit) = exit {
+            unsafe { ptr::copy_nonoverlapping(exit, exit_orig_ins_ptr, exit_orig_ins_len) };
+        }
+        let wrapper = unsafe { exit_orig_ins_ptr.offset(exit_orig_ins_len as isize) };
+        let exit_wrapper = unsafe { wrapper.offset(self.exit_wrapper_offset as isize) };
         self.buf.write(wrapper);
         if let Some(fixup) = import_fixup {
             unsafe {
@@ -420,12 +453,29 @@ impl HookWrapCode {
                 *(wrapper.offset(offset) as *mut usize) = fixup as usize;
             }
         }
-        let wrapper_ptr = unsafe {
+        let entry_pointer_to_wrapper = unsafe {
             let ptr = wrapper.offset(self.buf.len() as isize) as *mut *const u8;
             *ptr = wrapper;
             ptr
         };
-        (wrapper, orig_ins_len, wrapper_ptr)
+        let exit_pointer_to_wrapper = unsafe {
+            let ptr = wrapper.offset(self.buf.len() as isize + 8) as *mut *const u8;
+            *ptr = exit_wrapper;
+            ptr
+        };
+        let entry = ::GeneratedHook {
+            wrapper,
+            orig_ins_len: entry_orig_ins_len,
+            orig_ins: entry_orig_ins_ptr,
+            pointer_to_wrapper: entry_pointer_to_wrapper,
+        };
+        let exit = exit.map(|_| ::GeneratedHook {
+            wrapper: exit_wrapper,
+            orig_ins_len: exit_orig_ins_len,
+            orig_ins: exit_orig_ins_ptr,
+            pointer_to_wrapper: exit_pointer_to_wrapper,
+        });
+        (entry, exit, None)
     }
 }
 
