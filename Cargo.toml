@@ -8,19 +8,17 @@ byteorder = "1.2"
 lde = "0.2.0"
 libc = "0.2"
 rust_win32error = "0.8"
-scopeguard = "0.3"
 smallvec = "0.6"
 
 [dependencies.winapi]
-version = "0.3.2"
+version = "0.3.4"
 features = [
-    "fileapi", "handleapi", "heapapi", "libloaderapi", "memoryapi", "processenv",
-    "tlhelp32", "winerror", "winbase"
+    "fileapi", "heapapi", "libloaderapi", "memoryapi", "processenv", "winbase"
 ]
 
 [dev-dependencies.winapi]
-version = "0.3.2"
+version = "0.3.4"
 features = [
     "fileapi", "handleapi", "heapapi", "libloaderapi", "memoryapi", "processenv",
-    "sysinfoapi", "tlhelp32", "winerror", "winbase"
+    "sysinfoapi", "winbase"
 ]

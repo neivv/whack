@@ -3,8 +3,6 @@ extern crate lde;
 extern crate libc;
 extern crate winapi;
 extern crate rust_win32error;
-#[macro_use(defer)]
-extern crate scopeguard;
 extern crate smallvec;
 
 #[macro_use]
