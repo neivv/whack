@@ -7,7 +7,6 @@ version = "0.2.0"
 byteorder = "1.2"
 lde = "0.2.0"
 libc = "0.2"
-rust_win32error = "0.8"
 smallvec = "0.6"
 
 [dependencies.winapi]

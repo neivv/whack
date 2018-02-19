@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
+use std::io;
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
@@ -9,7 +10,6 @@ use std::ptr;
 
 use libc::c_void;
 
-use rust_win32error::Win32Error;
 use winapi;
 use winapi::shared::minwindef::HMODULE;
 use winapi::um::fileapi::{self, CreateFileW};
@@ -114,7 +114,7 @@ impl MemoryProtection {
                             mem_info.BaseAddress,
                             mem_info.RegionSize,
                             mem_info.Protect,
-                            Win32Error::new(),
+                            io::Error::last_os_error(),
                         );
                     }
                     let address = mem_info.BaseAddress as *mut c_void;

@@ -2,7 +2,6 @@ extern crate byteorder;
 extern crate lde;
 extern crate libc;
 extern crate winapi;
-extern crate rust_win32error;
 extern crate smallvec;
 
 #[macro_use]
