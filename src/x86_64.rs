@@ -335,8 +335,8 @@ impl FuncAssembler {
     }
 
     // Pushes are written at once in `finish_fnwrap`.
-    pub fn stack(&mut self, pos: i32) {
-        self.current_stack.push((self.arg_num, pos as u8));
+    pub fn stack(&mut self, pos: u8) {
+        self.current_stack.push((self.arg_num, pos));
         self.arg_num += 1;
     }
 

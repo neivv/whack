@@ -1,5 +1,7 @@
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use platform;
 use Patch;
 
 pub trait AddressHookClosure<Callback>: AddressHook {
@@ -404,10 +406,13 @@ macro_rules! whack_funcs {
         pub unsafe fn $init_fn(patch: &mut $crate::ModulePatcher) {
             unsafe fn init(base: usize, heap: &mut $crate::platform::ExecutableHeap) {
                 let diff = base.wrapping_sub($base as usize);
-                let mut buf = $crate::platform::FuncAssembler::new();
-                $(whack_fnwrap_write!(true, $addr as usize, buf, diff, [$($args)*]);)*
-                let funcs = buf.write(heap) as usize;
-                $(whack_fnwrap_finish!($name, buf, funcs);)*
+                const FUNC_ARGS: &[(&[(bool, u8)], usize)] = &[
+                    $(whack_fnwrap_write_args!($addr as usize, [$($args)*]),)*
+                ];
+                let func_ptrs: &[&::std::sync::atomic::AtomicUsize] = &[
+                    $(&$name.0,)*
+                ];
+                $crate::macros::init_funcs(diff, heap, true, FUNC_ARGS, func_ptrs);
             }
             patch.add_init_fn(init);
         }
@@ -418,33 +423,53 @@ macro_rules! whack_funcs {
         pub unsafe fn $init_fn(patch: &mut $crate::ModulePatcher) {
             unsafe fn init(base: usize, heap: &mut $crate::platform::ExecutableHeap) {
                 let diff = base.wrapping_sub($base as usize);
-                let mut buf = $crate::platform::FuncAssembler::new();
-                $(whack_fnwrap_write!(false, $addr as usize, buf, diff, [$($args)*]);)*
-                let funcs = buf.write(heap) as usize;
-                $(whack_fnwrap_finish!($name, buf, funcs);)*
+                const FUNC_ARGS: &[(&[(bool, u8)], usize)] = &[
+                    $(whack_fnwrap_write_args!($addr as usize, [$($args)*]),)*
+                ];
+                let func_ptrs: &[&::std::sync::atomic::AtomicUsize] = &[
+                    $(&$name.0,)*
+                ];
+                $crate::macros::init_funcs(diff, heap, false, FUNC_ARGS, func_ptrs);
             }
             patch.add_init_fn(init);
         }
     };
 }
 
-#[macro_export]
 #[doc(hidden)]
-macro_rules! whack_fnwrap_write {
-    ($is_stdcall:expr, $addr:expr, $buf:expr, $diff:expr, [$($args:tt)*]) => {
-        $buf.new_fnwrap();
-        whack_name_args!([fnwrap, $buf], [$([$args])*]);
-        $buf.finish_fnwrap($addr.wrapping_add($diff), $is_stdcall);
+pub unsafe fn init_funcs(
+    diff: usize,
+    heap: &mut platform::ExecutableHeap,
+    stdcall: bool,
+    func_args: &[(&[(bool, u8)], usize)],
+    func_ptrs: &[&AtomicUsize]
+) {
+    let mut buf = platform::FuncAssembler::new();
+    for &(ref args, addr) in func_args {
+        buf.new_fnwrap();
+        for &(is_stack, pos) in args.iter() {
+            if is_stack {
+                buf.stack(pos);
+            } else {
+                buf.register(pos);
+            }
+        }
+        buf.finish_fnwrap(addr.wrapping_add(diff), stdcall);
+    }
+    let funcs = buf.write(heap) as usize;
+    for ptr in func_ptrs {
+        ptr.store(funcs + buf.next_offset(), Ordering::Release);
     }
 }
 
-/// Updates function pointers so they point to the exec memory which was just generated.
-/// `buf.next_address` should just give next function offset every time
 #[macro_export]
 #[doc(hidden)]
-macro_rules! whack_fnwrap_finish {
-    ($name:ident, $buf:expr, $funcs:expr) => {
-        $name.0 = $funcs + $buf.next_offset();
+macro_rules! whack_fnwrap_write_args {
+    ($addr:expr, [$($args:tt)*]) => {
+        (
+            whack_name_args!([fnwrap], [$([$args])*]),
+            $addr,
+        )
     }
 }
 
@@ -465,26 +490,28 @@ macro_rules! whack_fndecl {
     ($name:ident, $ret:ty, $([$args:ty])*) => {
         #[allow(non_upper_case_globals)]
         pub static mut $name: $crate::Func<extern fn($($args),*) -> $ret> =
-            $crate::Func(0, ::std::marker::PhantomData);
+            $crate::Func(::std::sync::atomic::ATOMIC_USIZE_INIT, ::std::marker::PhantomData);
     };
 }
 
 #[macro_export]
 #[doc(hidden)]
 macro_rules! whack_fnwrap_write_separated {
-    ($buf:expr, $([$argloc:ident ~ $argpos:expr])*) => {{
-        $(whack_fnwrap_write_arg!($buf, [$argloc ~ $argpos]);)*
-    }}
+    ($([$argloc:ident ~ $argpos:expr])*) => {
+        &[
+            $(whack_fnwrap_write_arg!([$argloc ~ $argpos]),)*
+        ]
+    }
 }
 
 #[macro_export]
 #[doc(hidden)]
 macro_rules! whack_fnwrap_write_arg {
-    ($buf:expr, [stack ~ $apos:expr]) => {
-        $buf.stack($apos);
+    ([stack ~ $apos:expr]) => {
+        (true, $apos as u8)
     };
-    ($buf:expr, [$aloc:ident ~ $apos:expr]) => {
-        $buf.register(whack_reg_id!($aloc));
+    ([$aloc:ident ~ $apos:expr]) => {
+        (false, whack_reg_id!($aloc) as u8)
     };
 }
 
@@ -646,14 +673,14 @@ macro_rules! whack_name_args_recurse {
      [$($rest:ident),*]) => {
         whack_impl_import_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
     };
-    (nope, $imp_stack_pos:expr, [fnwrap, $($other:tt),*],
+    (nope, $imp_stack_pos:expr, [fnwrap],
      [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],
      [$($rest:ident),*], [$($rest_loc:ident($rest_pos:expr)),*]) => {
-        whack_fnwrap_write_separated!($($other,)* $([$okl ~ $okp])*);
+        whack_fnwrap_write_separated!($([$okl ~ $okp])*);
     };
-    (yup, $imp_stack_pos:expr, [fnwrap, $($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
+    (yup, $imp_stack_pos:expr, [fnwrap], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
      [$($rest:ident),*]) => {
-        whack_fnwrap_write_separated!($($other,)* $([$okl ~ $okp])*);
+        whack_fnwrap_write_separated!($([$okl ~ $okp])*);
     };
     (nope, $imp_stack_pos:expr, [fndecl, $($other:tt),*],
      [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],

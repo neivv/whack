@@ -5,7 +5,8 @@ extern crate winapi;
 extern crate smallvec;
 
 #[macro_use]
-mod macros;
+#[doc(hidden)]
+pub mod macros;
 #[macro_use]
 #[cfg(target_arch = "x86")]
 #[path = "macros_x86.rs"]
@@ -42,6 +43,7 @@ use std::ffi::OsStr;
 use std::marker::{PhantomData, Sync};
 use std::path::Path;
 use std::sync::{Arc, MutexGuard, Mutex};
+use std::sync::atomic::AtomicUsize;
 
 use libc::c_void;
 
@@ -1058,7 +1060,7 @@ impl<T> ops::DerefMut for Variable<T> {
 /// A type which wraps a memory address and `Deref`s to `fn(...) -> ...`.
 /// `Func` is meant to be created by the `whack_funcs!` macro, and to be used as it were
 /// a static mutable function pointer.
-pub struct Func<FnPtr>(pub usize, pub PhantomData<FnPtr>);
+pub struct Func<FnPtr>(pub AtomicUsize, pub PhantomData<FnPtr>);
 
 impl<FnPtr> ops::Deref for Func<FnPtr> {
     type Target = FnPtr;
