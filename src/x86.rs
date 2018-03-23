@@ -32,9 +32,9 @@ pub struct InlineCallCtx {
 
 impl InlineCallCtx {
     pub fn init_stack_copy_size(&mut self) {
-        let ebp = self.regs[5];
-        let esp = self.regs[4];
-        let val = ebp.wrapping_sub(esp).wrapping_add(8);
+        let ebp = self.regs[2];
+        let esp = self.regs[3];
+        let val = ebp.wrapping_sub(esp).wrapping_add(8) & !0xf;
         self.stack_copy_size = if val > 0x20 && val < 0x2000 {
             val
         } else {
