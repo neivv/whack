@@ -35,7 +35,7 @@ pub fn library_name<T: AsRef<OsStr>>(input: T) -> LibraryName {
 
 pub fn library_name_to_handle(name: &LibraryName) -> Option<LibraryHandle> {
     let result = unsafe { GetModuleHandleW(name.as_ptr()) };
-    if result == ptr::null_mut() { None } else { Some(result) }
+    if result.is_null() { None } else { Some(result) }
 }
 
 pub fn lib_handle_equals_name(handle: LibraryHandle, name: &LibraryName) -> bool {
@@ -126,7 +126,7 @@ impl MemoryProtection {
             }
         }
         MemoryProtection {
-            protections: protections,
+            protections,
         }
     }
 }
@@ -135,7 +135,7 @@ impl Drop for MemoryProtection {
     fn drop(&mut self) {
         unsafe {
             let mut tmp = 0;
-            for tp in self.protections.iter() {
+            for tp in &self.protections {
                 VirtualProtect(tp.0 as *mut _, tp.1, tp.2, &mut tmp);
             }
         }
@@ -152,7 +152,7 @@ pub unsafe fn redirect_stderr(filename: &Path) -> bool {
         winnt::FILE_ATTRIBUTE_NORMAL,
         ptr::null_mut(),
     );
-    if handle != ptr::null_mut() {
+    if !handle.is_null() {
         winapi::um::processenv::SetStdHandle(winbase::STD_ERROR_HANDLE, handle) != 0
     } else {
         false

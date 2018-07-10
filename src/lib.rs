@@ -1,3 +1,8 @@
+#![cfg_attr(feature = "cargo-clippy", allow(
+    needless_pass_by_value, match_bool, trivially_copy_pass_by_ref, new_without_default,
+    redundant_closure, ptr_arg, new_without_default_derive, len_without_is_empty,
+))]
+
 extern crate byteorder;
 extern crate lde;
 extern crate libc;
@@ -28,6 +33,7 @@ pub mod platform;
 #[doc(hidden)]
 pub mod platform;
 
+mod helpers;
 mod insertion_sort;
 mod patch_map;
 
@@ -61,9 +67,9 @@ struct ImportHook {
 }
 
 enum ModulePatchType {
-    Hook(HookPatch),
+    Hook(Box<HookPatch>),
     Data(ReplacingPatch),
-    Import(ImportHook, *const u8, *const u8),
+    Import(Box<ImportHook>, *const u8, *const u8),
 }
 
 unsafe impl Send for ModulePatchType {
@@ -286,7 +292,7 @@ impl ModulePatch {
             ModulePatchType::Import(ref hook, ref mut stored_wrapper, ref mut orig) => {
                 let addr = platform::import_addr(handles.write, &hook.library, &hook.export);
                 if let Some(addr) = addr {
-                    if *stored_wrapper == ptr::null() {
+                    if stored_wrapper.is_null() {
                         let out_ptr = Some(*addr as *const u8);
                         let (entry, _, _) =
                             hook.wrapper_code.write_wrapper(None, None, None, heap, out_ptr);
@@ -431,7 +437,7 @@ impl<'a> ActivePatcher<'a> {
             patches: Vec::new(),
             init_fns: Vec::new(),
             image_base: ImageBase::Executable,
-            expected_base: expected_base,
+            expected_base,
         }
     }
 
@@ -451,7 +457,7 @@ impl<'a> ActivePatcher<'a> {
             patches: Vec::new(),
             init_fns: Vec::new(),
             image_base: ImageBase::Library(Arc::new(platform::library_name(library))),
-            expected_base: expected_base,
+            expected_base,
         }
     }
 
@@ -477,7 +483,7 @@ impl<'a> ActivePatcher<'a> {
             patches: Vec::new(),
             init_fns: Vec::new(),
             image_base: ImageBase::Memory { write, exec: execute },
-            expected_base: expected_base,
+            expected_base,
         }
     }
 
@@ -754,14 +760,14 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
         ty: HookType,
     ) -> Patch {
         let patch = ModulePatch {
-            variant: ModulePatchType::Hook(HookPatch {
+            variant: ModulePatchType::Hook(Box::new(HookPatch {
                 wrapper_code: wrapper_assembler,
                 wrapper_target: target,
                 entry: None,
                 exit: None,
                 inline_parent_entry: None,
                 ty,
-            }),
+            })),
             image_base: self.image_base.clone(),
             active: false,
         };
@@ -856,7 +862,7 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
         }
 
         let group_key = parent.state.patch_groups.insert(PatchGroup {
-            image_base: image_base,
+            image_base,
             patches: keys,
             init_funcs: init_fns,
         });
@@ -927,13 +933,13 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     {
         let wrapper_target = H::write_target_objects(target);
         let patch = ModulePatch {
-            variant: ModulePatchType::Import(ImportHook {
-                library: library,
+            variant: ModulePatchType::Import(Box::new(ImportHook {
+                library,
                 export: H::default_export(),
                 wrapper_code: H::wrapper_assembler(wrapper_target.as_ptr())
                     .generate_wrapper_code(OrigFuncCallback::ImportHook),
-                wrapper_target: wrapper_target,
-            }, ptr::null(), ptr::null()),
+                wrapper_target,
+            }), ptr::null(), ptr::null()),
             image_base: self.image_base.clone(),
             active: false,
         };
@@ -1034,24 +1040,24 @@ impl<T> Variable<T> {
         }
     }
     pub unsafe fn ptr(&self) -> *const T {
-        mem::transmute(self.address)
+        self.address as *const T
     }
     pub unsafe fn mut_ptr(&self) -> *mut T {
-        mem::transmute(self.address)
+        self.address as *mut T
     }
 }
 
 impl<T> ops::Deref for Variable<T> {
     type Target = T;
     #[inline]
-    fn deref<'a>(&'a self) -> &'a T {
+    fn deref(&self) -> &T {
         unsafe { mem::transmute(self.address) }
     }
 }
 
 impl<T> ops::DerefMut for Variable<T> {
     #[inline]
-    fn deref_mut<'a>(&'a mut self) -> &'a mut T {
+    fn deref_mut(&mut self) -> &mut T {
         unsafe { mem::transmute(self.address) }
     }
 }
@@ -1065,6 +1071,6 @@ pub struct Func<FnPtr>(pub AtomicUsize, pub PhantomData<FnPtr>);
 impl<FnPtr> ops::Deref for Func<FnPtr> {
     type Target = FnPtr;
     fn deref(&self) -> &FnPtr {
-        unsafe { mem::transmute(&self.0) }
+        unsafe { &*(&self.0 as *const AtomicUsize as *const FnPtr) }
     }
 }

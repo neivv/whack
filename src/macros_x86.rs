@@ -122,6 +122,9 @@ macro_rules! whack_hook_impl_private {
 #[doc(hidden)]
 macro_rules! whack_hook_wrapper_impl {
     ($ret:ty, $([$aty:ty])*) => {
+        // Allowing this is slightly sketchy, relying on Vec's allocation alignment and
+        // that sizeof(T) is aligned as well
+        #[cfg_attr(feature = "cargo-clippy", allow(cast_ptr_alignment))]
         fn write_target_objects(target: T) -> Box<[u8]> {
             unsafe {
                 let fat_ptr_size =

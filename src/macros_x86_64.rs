@@ -124,6 +124,9 @@ macro_rules! whack_hook_impl_private {
 #[doc(hidden)]
 macro_rules! whack_hook_wrapper_impl {
     ($ret:ty, $([$aty:ty])*) => {
+        // Allowing this is slightly sketchy, relying on Vec's allocation alignment and
+        // that sizeof(T) is aligned as well
+        #[cfg_attr(feature = "cargo-clippy", allow(cast_ptr_alignment))]
         fn write_target_objects(target: T) -> Box<[u8]> {
             unsafe {
                 let fat_ptr_size =
@@ -131,13 +134,14 @@ macro_rules! whack_hook_wrapper_impl {
                 let size = ::std::mem::size_of::<T>() + fat_ptr_size;
                 let out = vec![0u8; size].into_boxed_slice();
 
-                let target_mem = out.as_ptr().offset(fat_ptr_size as isize) as *mut T;
-                ::std::ptr::copy_nonoverlapping(&target, target_mem, 1);
+                let target_mem = out.as_ptr().offset(fat_ptr_size as isize);
+                ::std::ptr::write_unaligned(target_mem as *mut T, target);
                 ::std::mem::forget(target);
                 let target_ptr: *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret = target_mem;
-                let ptr_pos = out.as_ptr()
-                    as *mut *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
-                ::std::ptr::copy_nonoverlapping(&target_ptr, ptr_pos, 1);
+                ::std::ptr::write_unaligned(
+                    out.as_ptr() as *mut *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret,
+                    target_ptr,
+                );
                 out
             }
         }

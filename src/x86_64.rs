@@ -7,6 +7,7 @@ use lde::{self, InsnSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use smallvec::SmallVec;
 
+use helpers::*;
 use insertion_sort;
 use OrigFuncCallback;
 pub use win_common::*;
@@ -18,8 +19,8 @@ pub unsafe fn write_jump_to_ptr(from: *mut u8, to_ptr: *const *const u8) {
     // Could technically just have different arch-specific types, but too lazy for that right now.
     *from = 0xff;
     *from.offset(1) = 0x25;
-    *(from.offset(2) as *mut u32) = 0;
-    *(from.offset(6) as *mut *const u8) = *to_ptr;
+    write_unaligned(from.offset(2), 0u32);
+    write_unaligned(from.offset(6), *to_ptr);
 }
 
 #[repr(C)]
@@ -121,7 +122,7 @@ impl AsmValue {
             1 => AsmValue::Register(2),
             2 => AsmValue::Register(8),
             3 => AsmValue::Register(9),
-            n => AsmValue::Stack(n as i16),
+            n => AsmValue::Stack(i16::from(n)),
         }
     }
 }
@@ -136,9 +137,9 @@ impl HookWrapAssembler {
     pub fn new(rust_in_wrapper: *const u8, target: *const u8, stdcall: bool) -> HookWrapAssembler
     {
         HookWrapAssembler {
-            rust_in_wrapper: rust_in_wrapper,
-            stdcall: stdcall,
-            target: target,
+            rust_in_wrapper,
+            stdcall,
+            target,
             args: SmallVec::new(),
         }
     }
@@ -394,7 +395,7 @@ impl FuncAssembler {
 
     pub fn write(&mut self, exec_heap: &mut ExecutableHeap) -> *const u8 {
         let data = exec_heap.allocate(self.buf.len());
-        self.buf.write(data);
+        unsafe { self.buf.write(data); }
         data
     }
 
@@ -421,6 +422,7 @@ impl HookWrapCode {
     /// relative jumps don't work with (rather rare use case of) aliasing view patching.
     /// The original instructions will be copied to memory right before the wrapper,
     /// to be used when patch is disabled.
+    #[cfg_attr(feature = "cargo-clippy", allow(cast_ptr_alignment))]
     pub fn write_wrapper(
         &self,
         entry: Option<*const u8>,
@@ -434,32 +436,42 @@ impl HookWrapCode {
         let entry_orig_ins_len = entry.map(&ins_len).unwrap_or(0);
         let exit_orig_ins_len = exit.map(&ins_len).unwrap_or(0);
 
-        let wrapper_len = self.buf.len() + entry_orig_ins_len + exit_orig_ins_len + 16;
+        let wrapper_len =
+            align(self.buf.len(), 8) +
+            align(entry_orig_ins_len, 8) +
+            align(exit_orig_ins_len, 8) + 16;
         let data = heap.allocate(wrapper_len);
         let entry_orig_ins_ptr = data;
+        let exit_orig_ins_ptr = unsafe {
+            entry_orig_ins_ptr.offset(align(entry_orig_ins_len, 8) as isize)
+        };
+        let wrapper = unsafe {
+            exit_orig_ins_ptr.offset(align(exit_orig_ins_len, 8) as isize)
+        };
+        let wrapper_end = unsafe {
+            wrapper.offset(align(self.buf.len(), 8) as isize)
+        };
         if let Some(entry) = entry {
             unsafe { ptr::copy_nonoverlapping(entry, entry_orig_ins_ptr, entry_orig_ins_len) };
         }
-        let exit_orig_ins_ptr = unsafe { entry_orig_ins_ptr.offset(entry_orig_ins_len as isize) };
         if let Some(exit) = exit {
             unsafe { ptr::copy_nonoverlapping(exit, exit_orig_ins_ptr, exit_orig_ins_len) };
         }
-        let wrapper = unsafe { exit_orig_ins_ptr.offset(exit_orig_ins_len as isize) };
         let exit_wrapper = unsafe { wrapper.offset(self.exit_wrapper_offset as isize) };
-        self.buf.write(wrapper);
+        unsafe { self.buf.write(wrapper); }
         if let Some(fixup) = import_fixup {
             unsafe {
                 let offset = self.import_fixup_offset as isize;
-                *(wrapper.offset(offset) as *mut usize) = fixup as usize;
+                write_unaligned(wrapper.offset(offset), fixup as usize);
             }
         }
         let entry_pointer_to_wrapper = unsafe {
-            let ptr = wrapper.offset(self.buf.len() as isize) as *mut *const u8;
+            let ptr = wrapper_end as *mut *const u8;
             *ptr = wrapper;
             ptr
         };
         let exit_pointer_to_wrapper = unsafe {
-            let ptr = wrapper.offset(self.buf.len() as isize + 8) as *mut *const u8;
+            let ptr = wrapper_end.offset(8) as *mut *const u8;
             *ptr = exit_wrapper;
             ptr
         };
@@ -539,27 +551,25 @@ impl AssemblerBuf {
         ConstOffsets(const_offset_begin)
     }
 
-    pub fn write(&self, out: *mut u8) {
+    pub unsafe fn write(&self, out: *mut u8) {
         let diff = out as usize;
-        unsafe {
-            ptr::copy_nonoverlapping(self.buf.as_ptr(), out, self.buf.len());
-            for &(fixup, value) in self.fixups.iter() {
-                let value_pos = fixup + 4 +
-                    (&self.buf[fixup .. fixup + 4]).read_u32::<LittleEndian>().unwrap() as usize;
-                *(out.offset(value_pos as isize) as *mut u64) = value.wrapping_add(diff as u64);
-            }
+        ptr::copy_nonoverlapping(self.buf.as_ptr(), out, self.buf.len());
+        for &(fixup, value) in self.fixups.iter() {
+            let value_pos = fixup + 4 +
+                (&self.buf[fixup .. fixup + 4]).read_u32::<LittleEndian>().unwrap() as usize;
+            write_unaligned(out.offset(value_pos as isize), value.wrapping_add(diff as u64));
         }
     }
 
     pub fn push(&mut self, val: AsmValue) {
         match val {
             AsmValue::Undecided => {
-                self.buf.write(&[0xff, 0x35]).unwrap();
+                self.buf.write_all(&[0xff, 0x35]).unwrap();
                 self.fixups.push((self.buf.len(), 0));
                 self.buf.write_u32::<LittleEndian>(0).unwrap();
             }
             AsmValue::Constant(val) => {
-                self.buf.write(&[0xff, 0x35]).unwrap();
+                self.buf.write_all(&[0xff, 0x35]).unwrap();
                 self.constants.push((self.buf.len(), val));
                 self.buf.write_u32::<LittleEndian>(0).unwrap();
             }
@@ -570,16 +580,16 @@ impl AssemblerBuf {
                 self.buf.write_u8(0x50 + (reg & 7)).unwrap();
             }
             AsmValue::Stack(pos) => {
-                let offset = (pos * 8) as i32 + self.stack_offset + 8;
+                let offset = i32::from(pos * 8) + self.stack_offset + 8;
                 match offset {
                     0 => {
-                        self.buf.write(&[0xff, 0x34, 0xe4]).unwrap();
+                        self.buf.write_all(&[0xff, 0x34, 0xe4]).unwrap();
                     }
                     x if x < 0x80 => {
-                        self.buf.write(&[0xff, 0x74, 0xe4, x as u8]).unwrap();
+                        self.buf.write_all(&[0xff, 0x74, 0xe4, x as u8]).unwrap();
                     }
                     x => {
-                        self.buf.write(&[0xff, 0xb4, 0xe4]).unwrap();
+                        self.buf.write_all(&[0xff, 0xb4, 0xe4]).unwrap();
                         self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
                     }
                 }
@@ -610,14 +620,14 @@ impl AssemblerBuf {
             self.buf.write_u8(x).unwrap();
         }
         for x in 0x50..0x58 {
-            self.buf.write(&[0x41, x]).unwrap();
+            self.buf.write_all(&[0x41, x]).unwrap();
         }
         self.stack_offset += 15 * 8;
     }
 
     pub fn popad(&mut self) {
         for x in (0x58..0x60).rev() {
-            self.buf.write(&[0x41, x]).unwrap();
+            self.buf.write_all(&[0x41, x]).unwrap();
         }
         for x in (0x5e..0x60).rev() {
             self.buf.write_u8(x).unwrap();
@@ -643,16 +653,16 @@ impl AssemblerBuf {
             (AsmValue::Register(to), AsmValue::Stack(from)) => {
                 let reg_spec_byte = 0x48 + if to >= 8 { 4 } else { 0 };
                 self.buf.write_u8(reg_spec_byte).unwrap();
-                let offset = (from as i32 * 8) + 8 + self.stack_offset;
+                let offset = (i32::from(from) * 8) + 8 + self.stack_offset;
                 match offset {
                     0 => {
-                        self.buf.write(&[0x8b, 0x4 + (to & 7) * 8, 0xe4]).unwrap();
+                        self.buf.write_all(&[0x8b, 0x4 + (to & 7) * 8, 0xe4]).unwrap();
                     }
                     x if x < 0x80 => {
-                        self.buf.write(&[0x8b, 0x44 + (to & 7) * 8, 0xe4, x as u8]).unwrap();
+                        self.buf.write_all(&[0x8b, 0x44 + (to & 7) * 8, 0xe4, x as u8]).unwrap();
                     }
                     x => {
-                        self.buf.write(&[0x8b, 0x84 + (to & 7) * 8, 0xe4]).unwrap();
+                        self.buf.write_all(&[0x8b, 0x84 + (to & 7) * 8, 0xe4]).unwrap();
                         self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
                     }
                 }
@@ -667,7 +677,7 @@ impl AssemblerBuf {
             }
             (AsmValue::Register(to), AsmValue::Constant(val)) => {
                 let reg_spec_byte = 0x48 + if to >= 8 { 4 } else { 0 };
-                self.buf.write(&[reg_spec_byte, 0x8b, (to & 7) * 8 + 0x5]).unwrap();
+                self.buf.write_all(&[reg_spec_byte, 0x8b, (to & 7) * 8 + 0x5]).unwrap();
                 self.constants.push((self.buf.len(), val));
                 self.buf.write_u32::<LittleEndian>(0).unwrap();
             }
@@ -679,10 +689,10 @@ impl AssemblerBuf {
         match value {
             0 => (),
             x if x < 0x80 => {
-                self.buf.write(&[0x48, 0x83, 0xc4, x as u8]).unwrap();
+                self.buf.write_all(&[0x48, 0x83, 0xc4, x as u8]).unwrap();
             }
             x => {
-                self.buf.write(&[0x48, 0x81, 0xc4]).unwrap();
+                self.buf.write_all(&[0x48, 0x81, 0xc4]).unwrap();
                 self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
             }
         }
@@ -693,10 +703,10 @@ impl AssemblerBuf {
         match value {
             0 => (),
             x if x < 0x80 => {
-                self.buf.write(&[0x48, 0x83, 0xec, x as u8]).unwrap();
+                self.buf.write_all(&[0x48, 0x83, 0xec, x as u8]).unwrap();
             }
             x => {
-                self.buf.write(&[0x48, 0x81, 0xec]).unwrap();
+                self.buf.write_all(&[0x48, 0x81, 0xec]).unwrap();
                 self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
             }
         }
@@ -715,7 +725,7 @@ impl AssemblerBuf {
     pub fn jump(&mut self, target: AsmValue) {
         match target {
             AsmValue::Constant(dest) => {
-                self.buf.write(&[0xff, 0x25]).unwrap();
+                self.buf.write_all(&[0xff, 0x25]).unwrap();
                 self.constants.push((self.buf.len(), dest));
                 self.buf.write_u32::<LittleEndian>(0).unwrap();
             }
@@ -723,7 +733,7 @@ impl AssemblerBuf {
                 if dest >= 8 {
                     self.buf.write_u8(0x41).unwrap();
                 }
-                self.buf.write(&[0xff, 0xe0 + (dest & 7)]).unwrap();
+                self.buf.write_all(&[0xff, 0xe0 + (dest & 7)]).unwrap();
             }
             _ => unimplemented!(),
         }
@@ -738,14 +748,14 @@ impl AssemblerBuf {
                 if dest >= 8 {
                     self.buf.write_u8(0x41).unwrap();
                 }
-                self.buf.write(&[0xff, 0xd0 + (dest & 7)]).unwrap();
+                self.buf.write_all(&[0xff, 0xd0 + (dest & 7)]).unwrap();
             }
             _ => unimplemented!(),
         }
     }
 
     fn call_const(&mut self, val: u64) -> ConstOffset{
-        self.buf.write(&[0xff, 0x15]).unwrap();
+        self.buf.write_all(&[0xff, 0x15]).unwrap();
         self.constants.push((self.buf.len(), val));
         self.buf.write_u32::<LittleEndian>(0).unwrap();
         ConstOffset(self.constants.len() - 1)

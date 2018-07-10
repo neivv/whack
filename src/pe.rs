@@ -1,4 +1,3 @@
-#[allow(unused_imports)] use std::ascii::AsciiExt;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
@@ -28,7 +27,7 @@ pub unsafe fn import_ptr(image_base: usize,
             let name_addr = image_base + name_offset;
             let name = CStr::from_ptr(name_addr as *const c_char);
             if name.to_bytes().eq_ignore_ascii_case(dll_name) {
-                let lookups = image_base + read_at::<u32>(imps + pos as usize + 0x0) as usize;
+                let lookups = image_base + read_at::<u32>(imps + pos as usize) as usize;
                 let addresses = image_base + read_at::<u32>(imps + pos as usize + 0x10) as usize;
                 return Some((lookups, addresses, is_64));
             }
@@ -43,7 +42,7 @@ pub unsafe fn import_ptr(image_base: usize,
                 // the highest one which is the name/ordinal bool bool.
                 let val = read_at::<u32>(lookups + pos);
                 let high = read_at::<u32>(lookups + pos + 4);
-                val | (high & 0x80000000)
+                val | (high & 0x8000_0000)
             } else {
                 read_at::<u32>(lookups + pos)
             };
@@ -52,7 +51,7 @@ pub unsafe fn import_ptr(image_base: usize,
             }
             match *import {
                 Export::Name(name) => {
-                    if val & 0x80000000 == 0 {
+                    if val & 0x8000_0000 == 0 {
                         let name_addr = image_base + val as usize + 2;
                         let func_name = CStr::from_ptr(name_addr as *const c_char);
                         if func_name.to_bytes() == name {
@@ -61,7 +60,7 @@ pub unsafe fn import_ptr(image_base: usize,
                     }
                 }
                 Export::Ordinal(ord) => {
-                    if val & 0x80000000 != 0 && (val & 0xffff) as u16 == ord {
+                    if val & 0x8000_0000 != 0 && (val & 0xffff) as u16 == ord {
                         return Some((addresses + pos) as *mut usize);
                     }
                 }

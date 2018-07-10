@@ -18,10 +18,11 @@ pub trait AddressHook {
     unsafe fn hook(self, patch: &mut ::ModulePatcher, val: Self::Fnptr) -> Patch;
     unsafe fn hook_opt(self, patch: &mut ::ModulePatcher, val: Self::OptFnptr) -> Patch;
     unsafe fn call_hook(self, patch: &mut ::ModulePatcher, val: Self::Fnptr) -> Patch;
-    unsafe fn custom_calling_convention<'a>(self,
-                                            val: Self::Fnptr,
-                                            exec_heap: &mut ::platform::ExecutableHeap,
-                                            ) -> *const u8;
+    unsafe fn custom_calling_convention(
+        self,
+        val: Self::Fnptr,
+        exec_heap: &mut ::platform::ExecutableHeap,
+    ) -> *const u8;
     /// Generates the wrapper code, which may be used multiple times.
     ///
     /// `target` must be kept alive as long as any of the wrappers generated exist.
@@ -221,11 +222,11 @@ macro_rules! whack_addr_hook_common {
             })
         }
 
-        unsafe fn custom_calling_convention<'a>(self,
-                                                val: Self::Fnptr,
-                                                exec_heap: &mut $crate::platform::ExecutableHeap
-                                                ) -> *const u8
-        {
+        unsafe fn custom_calling_convention(
+            self,
+            val: Self::Fnptr,
+            exec_heap: &mut $crate::platform::ExecutableHeap,
+        ) -> *const u8 {
             // So that H becomes a valid type
             fn x<H, T>(target: T, exec_heap: &mut $crate::platform::ExecutableHeap) -> *const u8
             where H: $crate::AddressHookClosure<T>
