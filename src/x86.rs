@@ -16,6 +16,11 @@ use insertion_sort;
 use OrigFuncCallback;
 pub use win_common::*;
 
+// hack for rustc const eval false errors
+fn cast_fnptr_usize(x: usize) -> u32 {
+    x as u32
+}
+
 const JUMP_INS_LEN: usize = 6;
 #[inline]
 pub unsafe fn write_jump_to_ptr(from: *mut u8, to_ptr: *const *const u8) {
@@ -238,7 +243,7 @@ impl HookWrapAssembler {
                 // It'll also alloc space for InlineCallCtx::stack_copy_size with this push
                 buffer.push(AsmValue::Constant(tls_id));
                 buffer.push(AsmValue::Register(4));
-                buffer.call(AsmValue::Constant(set_inline_tls as u32));
+                buffer.call(AsmValue::Constant(cast_fnptr_usize(set_inline_tls as usize)));
                 buffer.stack_add(8);
                 buffer.popad();
                 buffer.stack_sub(0x28);
@@ -268,7 +273,9 @@ impl HookWrapAssembler {
             }
             OrigFuncCallback::Inline(_, exit, _) => {
                 buffer.push(AsmValue::Constant(tls_id));
-                buffer.call(AsmValue::Constant(inline_tls_pop_enabled as u32));
+                buffer.call(
+                    AsmValue::Constant(cast_fnptr_usize(inline_tls_pop_enabled as usize))
+                );
                 buffer.stack_add(8);
                 buffer.popad();
                 unsafe {
@@ -384,7 +391,7 @@ impl HookWrapAssembler {
         buffer.push(AsmValue::Register(1));
         buffer.push(AsmValue::Register(2));
         buffer.push(AsmValue::Constant(tls_id));
-        buffer.call(AsmValue::Constant(get_inline_tls as u32));
+        buffer.call(AsmValue::Constant(cast_fnptr_usize(get_inline_tls as usize)));
         buffer.pop(AsmValue::Register(1));
         // Doing rest like this due to the jump
         buffer.buf.write_all(&[
@@ -422,7 +429,7 @@ impl HookWrapAssembler {
         // and popping on exit.
         buffer.pushad();
         buffer.push(AsmValue::Constant(tls_id));
-        buffer.call(AsmValue::Constant(inline_tls_push_disable as u32));
+        buffer.call(AsmValue::Constant(cast_fnptr_usize(inline_tls_push_disable as usize)));
         buffer.pop(AsmValue::Register(0));
         buffer.popad();
         for i in (0..12).rev() {
@@ -438,7 +445,7 @@ impl HookWrapAssembler {
         buffer.fixup_to_position(return_addr);
         buffer.pushad();
         buffer.push(AsmValue::Constant(tls_id));
-        buffer.call(AsmValue::Constant(inline_tls_pop_disable as u32));
+        buffer.call(AsmValue::Constant(cast_fnptr_usize(inline_tls_pop_disable as usize)));
         buffer.pop(AsmValue::Register(0));
         buffer.popad();
         buffer.stack_add(12 * 4);
