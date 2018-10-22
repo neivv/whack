@@ -134,9 +134,8 @@ macro_rules! whack_hook_wrapper_impl {
                 let size = ::std::mem::size_of::<T>() + fat_ptr_size;
                 let out = vec![0u8; size].into_boxed_slice();
 
-                let target_mem = out.as_ptr().offset(fat_ptr_size as isize);
-                ::std::ptr::write_unaligned(target_mem as *mut T, target);
-                ::std::mem::forget(target);
+                let target_mem = out.as_ptr().offset(fat_ptr_size as isize) as *mut T;
+                ::std::ptr::write_unaligned(target_mem, target);
                 let target_ptr: *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret = target_mem;
                 ::std::ptr::write_unaligned(
                     out.as_ptr() as *mut *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret,

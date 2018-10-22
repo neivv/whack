@@ -133,12 +133,12 @@ macro_rules! whack_hook_wrapper_impl {
                 let out = vec![0u8; size].into_boxed_slice();
 
                 let target_mem = out.as_ptr().offset(fat_ptr_size as isize) as *mut T;
-                ::std::ptr::copy_nonoverlapping(&target, target_mem, 1);
-                ::std::mem::forget(target);
+                ::std::ptr::write_unaligned(target_mem, target);
                 let target_ptr: *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret = target_mem;
-                let ptr_pos = out.as_ptr()
-                    as *mut *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
-                ::std::ptr::copy_nonoverlapping(&target_ptr, ptr_pos, 1);
+                ::std::ptr::write_unaligned(
+                    out.as_ptr() as *mut *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret,
+                    target_ptr,
+                );
                 out
             }
         }
