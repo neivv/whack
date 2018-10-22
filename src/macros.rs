@@ -94,32 +94,32 @@ pub trait ExportHook {
 #[macro_export]
 macro_rules! whack_export {
     (pub extern "system" ($ord:expr) $name:ident($($aty:tt)*) -> $ret:ty) => {
-        whack_name_args!([imp, yes, system, $ord, $name, $ret], [$([$aty])*]);
+        whack_name_args!([imp, yes, system, $ord, $name, $ret], [$($aty)*]);
     };
     (extern "system" ($ord:expr) $name:ident($($aty:tt)*) -> $ret:ty) => {
-        whack_name_args!([imp, no, system, $ord, $name, $ret], [$([$aty])*]);
+        whack_name_args!([imp, no, system, $ord, $name, $ret], [$($aty)*]);
     };
     (pub extern "system" $name:ident($($aty:tt)*)) => {
-        whack_name_args!([imp, yes, system, (-1i32), $name, ()], [$([$aty])*]);
+        whack_name_args!([imp, yes, system, (-1i32), $name, ()], [$($aty)*]);
     };
     (pub extern "system" $name:ident($($aty:tt)*) -> $ret:ty) => {
-        whack_name_args!([imp, yes, system, (-1i32), $name, $ret], [$([$aty])*]);
+        whack_name_args!([imp, yes, system, (-1i32), $name, $ret], [$($aty)*]);
     };
     (extern "system" $name:ident($($aty:tt)*)) => {
-        whack_name_args!([imp, no, system, (-1i32), $name, ()], [$([$aty])*]);
+        whack_name_args!([imp, no, system, (-1i32), $name, ()], [$($aty)*]);
     };
     (extern "system" $name:ident($($aty:tt)*) -> $ret:ty) => {
-        whack_name_args!([imp, no, system, (-1i32), $name, $ret], [$([$aty])*]);
+        whack_name_args!([imp, no, system, (-1i32), $name, $ret], [$($aty)*]);
     };
 }
 
 #[macro_export]
 macro_rules! whack_hook_decls {
     ($($name:ident($($args:tt)*) -> $ret:ty;)*) => {
-        $(whack_name_args!([hook_decl, $name, $ret], [$([$args])*]);)*
+        $(whack_name_args!([hook_decl, $name, $ret], [$($args)*]);)*
     };
     ($($name:ident($($args:tt)*);)*) => {
-        $(whack_name_args!([hook_decl, $name, ()], [$([$args])*]);)*
+        $(whack_name_args!([hook_decl, $name, ()], [$($args)*]);)*
     };
 }
 
@@ -182,16 +182,16 @@ macro_rules! whack_hooks {
 #[doc(hidden)]
 macro_rules! whack_address_hook {
     ($abi:ident, $base:expr, $addr:expr, pub $name:ident($($aty:tt)*)) => {
-        whack_name_args!([addr, yes, $abi, $base, $addr, $name, ()], [$([$aty])*]);
+        whack_name_args!([addr, yes, $abi, $base, $addr, $name, ()], [$($aty)*]);
     };
     ($abi:ident, $base:expr, $addr:expr, pub $name:ident($($aty:tt)*) -> $ret:ty) => {
-        whack_name_args!([addr, yes, $abi, $base, $addr, $name, $ret], [$([$aty])*]);
+        whack_name_args!([addr, yes, $abi, $base, $addr, $name, $ret], [$($aty)*]);
     };
     ($abi:ident, $base:expr, $addr:expr, $name:ident($($aty:tt)*)) => {
-        whack_name_args!([addr, no, $abi, $base, $addr, $name, ()], [$([$aty])*]);
+        whack_name_args!([addr, no, $abi, $base, $addr, $name, ()], [$($aty)*]);
     };
     ($abi:ident, $base:expr, $addr:expr, $name:ident($($aty:tt)*) -> $ret:ty) => {
-        whack_name_args!([addr, no, $abi, $base, $addr, $name, $ret], [$([$aty])*]);
+        whack_name_args!([addr, no, $abi, $base, $addr, $name, $ret], [$($aty)*]);
     };
 }
 
@@ -468,7 +468,7 @@ pub unsafe fn init_funcs(
 macro_rules! whack_fnwrap_write_args {
     ($addr:expr, [$($args:tt)*]) => {
         (
-            whack_name_args!([fnwrap], [$([$args])*]),
+            whack_name_args!([fnwrap], [$($args)*]),
             $addr,
         )
     }
@@ -481,7 +481,7 @@ macro_rules! whack_fn {
         whack_fn!(pub $name($($args)*) -> ());
     };
     (pub $name:ident($($args:tt)*) -> $ret:ty) => {
-        whack_name_args!([fndecl, $name, $ret], [$([$args])*]);
+        whack_name_args!([fndecl, $name, $ret], [$($args)*]);
     };
 }
 
@@ -552,7 +552,7 @@ macro_rules! whack_name_args_recurse {
     // Last arg @ stack
     (nope, $imp_stack_pos:expr, [$($other:tt),*],
         [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
-        [@ stack($pos:expr) $next_ty:ty],
+        [@ stack($pos:expr) $next_ty:ty $(,)*],
         [$next_id:ident, $($rest_id:ident),*],
         [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
@@ -561,7 +561,7 @@ macro_rules! whack_name_args_recurse {
             [], [$($rest_id),*]);
     };
     (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
-        [@ stack($pos:expr) $next_ty:ty],
+        [@ stack($pos:expr) $next_ty:ty $(,)*],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
         whack_name_args_recurse!(yup, $imp_stack_pos, [$($other),*],
@@ -590,7 +590,7 @@ macro_rules! whack_name_args_recurse {
     // Last arg @location
     (nope, $imp_stack_pos:expr, [$($other:tt),*],
         [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
-        [@ $loc:ident $next_ty:ty],
+        [@ $loc:ident $next_ty:ty $(,)*],
         [$next_id:ident, $($rest_id:ident),*],
         [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
@@ -599,7 +599,7 @@ macro_rules! whack_name_args_recurse {
             [], [$($rest_id),*]);
     };
     (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
-        [@ $loc:ident $next_ty:ty],
+        [@ $loc:ident $next_ty:ty $(,)*],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
         whack_name_args_recurse!(yup, $imp_stack_pos, [$($other),*],
@@ -628,7 +628,7 @@ macro_rules! whack_name_args_recurse {
     };
     // Last arg without @location
     (nope, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
-        [$next_ty:ty],
+        [$next_ty:ty $(,)*],
         [$next_id:ident, $($rest_id:ident),*],
         [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
     {
@@ -639,7 +639,7 @@ macro_rules! whack_name_args_recurse {
             [], [$($rest_id),*], [$($rest_loc($rest_pos)),*]);
     };
     (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
-        [$next_ty:ty],
+        [$next_ty:ty $(,)*],
         [$next_id:ident, $($rest_id:ident),*]) =>
     {
         whack_name_args_recurse!(yup, $imp_stack_pos + 1, [$($other),*],

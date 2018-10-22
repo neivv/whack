@@ -51,6 +51,11 @@ mod hook_decl_tests_loc {
         0x2514 => Implicit(u32, @edi u32);
         0x2514 => Implicit2(@esi u32, u32);
         0x1233 => StackAfterLoc(@ecx u32, @stack(0) u32);
+        0x1233 => TrailingComma(
+            @ecx u32,
+            u32,
+            u32,
+        );
     );
 }
 
@@ -62,6 +67,11 @@ mod hook_decl_tests_loc {
         0x2514 => Implicit(u32, @rdi u32);
         0x2514 => Implicit2(@rsi u32, u32);
         0x1233 => StackAfterLoc(@rcx u32, @stack(0) u32);
+        0x1233 => TrailingComma(
+            @rcx u32,
+            u32,
+            u32,
+        );
     );
 }
 
