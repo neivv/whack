@@ -491,7 +491,7 @@ macro_rules! whack_fndecl {
     ($name:ident, $ret:ty, $([$args:ty])*) => {
         #[allow(non_upper_case_globals)]
         pub static mut $name: $crate::Func<extern fn($($args),*) -> $ret> =
-            $crate::Func(::std::sync::atomic::ATOMIC_USIZE_INIT, ::std::marker::PhantomData);
+            $crate::Func(::std::sync::atomic::AtomicUsize::new(0), ::std::marker::PhantomData);
     };
 }
 
