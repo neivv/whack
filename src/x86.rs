@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::mem;
 use std::ptr;
 use std::slice;
-use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::io::Write;
 
 use lde::{self, InsnSet};
@@ -56,7 +56,7 @@ thread_local! {
 }
 
 fn new_inline_tls_id() -> usize {
-    static TLS_IDS: AtomicUsize = ATOMIC_USIZE_INIT;
+    static TLS_IDS: AtomicUsize = AtomicUsize::new(0);
     TLS_IDS.fetch_add(1, Ordering::SeqCst)
 }
 
