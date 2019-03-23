@@ -63,7 +63,7 @@ fn import_hooking() {
         let mut locked = root_patcher.lock().unwrap();
         {
             let mut exe = locked.patch_exe(!0);
-            tick_count_patch = exe.import_hook_closure(b"kernel32"[..].into(), GetTickCount,
+            tick_count_patch = exe.import_hook_closure(&b"kernel32"[..], GetTickCount,
                 move |orig: &Fn() -> _| {
                 add_tick_count_call();
                 orig()
@@ -72,7 +72,7 @@ fn import_hooking() {
         }
         let mut patcher = locked.patch_exe(!0);
         let copy = value.clone();
-        create_file_patch = patcher.import_hook_closure(b"kernel32"[..].into(), CreateFileW,
+        create_file_patch = patcher.import_hook_closure(&b"kernel32"[..], CreateFileW,
             move |filename: *const u16, a, b, c, d, e, f, orig: &Fn(_, _, _, _, _, _, _) -> _| {
             let prev = copy.fetch_add(1, Ordering::SeqCst);
             let mut modified = vec![0; 1024];
@@ -91,8 +91,8 @@ fn import_hooking() {
             }
             orig(modified.as_ptr(), a, b, c, d, e, f)
         });
-        patcher.import_hook_opt(b"kernel32"[..].into(), CloseHandle, close_handle_log);
-        patcher.import_hook(b"kernel32"[..].into(), GetProfileIntW, hook_without_orig);
+        patcher.import_hook_opt(&b"kernel32"[..], CloseHandle, close_handle_log);
+        patcher.import_hook(&b"kernel32"[..], GetProfileIntW, hook_without_orig);
         patcher.apply();
     }
     unsafe {

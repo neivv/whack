@@ -924,17 +924,19 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     ///
     /// This function doesn't require `library` to be loaded. As such, if the library doesn't
     /// actually export `hook`, any errors will not be reported.
-    pub fn import_hook_closure<H, T>(&mut self,
-                                     library: Cow<'static, [u8]>,
-                                     _hook: H,
-                                     target: T
-                                    ) -> Patch
+    pub fn import_hook_closure<H, T, L>(
+        &mut self,
+        library: L,
+        _hook: H,
+        target: T,
+    ) -> Patch
     where H: ExportHookClosure<T>,
+          L: Into<Cow<'static, [u8]>>,
     {
         let wrapper_target = H::write_target_objects(target);
         let patch = ModulePatch {
             variant: ModulePatchType::Import(Box::new(ImportHook {
-                library,
+                library: library.into(),
                 export: H::default_export(),
                 wrapper_code: H::wrapper_assembler(wrapper_target.as_ptr())
                     .generate_wrapper_code(OrigFuncCallback::ImportHook),
@@ -950,27 +952,31 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
 
     /// Same as `import_hook_closure`, but hooks to an `unsafe fn` which doesn't take
     /// reference to the original function.
-    pub fn import_hook<H>(&mut self,
-                          library: Cow<'static, [u8]>,
-                          hook: H,
-                          target: H::Fnptr
-                          ) -> Patch
+    pub fn import_hook<H, L>(
+        &mut self,
+        library: L,
+        hook: H,
+        target: H::Fnptr,
+    ) -> Patch
     where H: ExportHook,
+          L: Into<Cow<'static, [u8]>>,
     {
-        hook.import(self, library, target)
+        hook.import(self, library.into(), target)
     }
 
 
     /// Same as `import_hook_closure`, but hooks to an `unsafe fn` which can also call the
     /// original function.
-    pub fn import_hook_opt<H>(&mut self,
-                              library: Cow<'static, [u8]>,
-                              hook: H,
-                              target: H::OptFnptr
-                             ) -> Patch
+    pub fn import_hook_opt<H, L>(
+        &mut self,
+        library: L,
+        hook: H,
+        target: H::OptFnptr,
+    ) -> Patch
     where H: ExportHook,
+          L: Into<Cow<'static, [u8]>>,
     {
-        hook.import_opt(self, library, target)
+        hook.import_opt(self, library.into(), target)
     }
 
     /// Allocates memory from patcher's executable memory heap.

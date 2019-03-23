@@ -84,7 +84,7 @@ pub trait ExportHook {
 ///         // Calling IsDebuggerPresent from a library or with GetProcAddress will
 ///         // still work though.
 ///         let mut exe = active_patcher.patch_exe(!0);
-///         exe.import_hook_closure(b"kernel32"[..].into(), IsDebuggerPresent,
+///         exe.import_hook_closure(&b"kernel32"[..], IsDebuggerPresent,
 ///             |_orig: &Fn() -> _| { 0 });
 ///     }
 ///     // Note: Dropping `Patcher` is supposed to revert the patches,
