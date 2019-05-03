@@ -766,7 +766,7 @@ impl AssemblerBuf {
         let diff = out as usize;
         unsafe {
             // TODO USE IMAGINED BASE
-            copy_instructions_ignore_shortjmp(self.buf.as_ptr(), out, self.buf.len());
+            copy_instructions_ignore_shortjmp(&self.buf, out);
             for &fixup in self.fixups.iter() {
                 let prev = (&self.buf[fixup .. fixup + 4]).read_u32::<LittleEndian>().unwrap();
                 write_unaligned(out.offset(fixup as isize), prev.wrapping_add(diff as u32));
@@ -976,12 +976,11 @@ pub unsafe fn copy_instruction_length(ins: *const u8, min_length: usize) -> usiz
 
 // Assumes that short jumps won't need to be changed
 unsafe fn copy_instructions_ignore_shortjmp(
-    src: *const u8,
+    src: &[u8],
     mut dst: *mut u8,
-    min_length: usize,
 ) {
-    let mut len = min_length as isize;
-    for (opcode, _) in lde::x86::lde(slice::from_raw_parts(src, min_length + 32), 0) {
+    let mut len = src.len() as isize;
+    for (opcode, _) in lde::x86::lde(src, 0) {
         if len <= 0 {
             return;
         }
@@ -1009,7 +1008,9 @@ unsafe fn copy_instructions_ignore_shortjmp(
         dst = dst.offset(ins_len);
         len -= ins_len;
     }
-    panic!("Could not disassemble {:x}", src as usize);
+    if len != 0 {
+        panic!("Could not disassemble {:02x?}", src);
+    }
 }
 
 // Dst_base is the address at which the code is *imagined* to be at, so it won't matter if
@@ -1076,5 +1077,7 @@ unsafe fn copy_instructions(
         }
         len -= ins_len;
     }
-    panic!("Could not disassemble {:x}", src as usize);
+    if len != 0 {
+        panic!("Could not disassemble {:x}", src as usize);
+    }
 }

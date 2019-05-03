@@ -887,7 +887,7 @@ impl<'a: 'b, 'b> ModulePatcher<'a, 'b> {
     ///
     /// `address` uses the expected base which was specified when creating this `ModulePatcher`.
     pub unsafe fn replace_val<T: Copy>(&mut self, address: usize, val: T) -> Patch {
-        use std::{mem, slice};
+        use std::{slice};
         let slice = slice::from_raw_parts(&val as *const T as *const u8, mem::size_of::<T>());
         self.replace(address, slice)
     }
