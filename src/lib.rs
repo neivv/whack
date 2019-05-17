@@ -6,8 +6,9 @@
 extern crate byteorder;
 extern crate lde;
 extern crate libc;
-extern crate winapi;
+extern crate parking_lot;
 extern crate smallvec;
+extern crate winapi;
 
 #[macro_use]
 #[doc(hidden)]
@@ -48,10 +49,11 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::marker::{PhantomData, Sync};
 use std::path::Path;
-use std::sync::{Arc, MutexGuard, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use libc::c_void;
+use parking_lot::{Mutex, MutexGuard};
 
 use smallvec::SmallVec;
 
@@ -401,14 +403,14 @@ impl Patcher {
 
     /// Locks the mutex, allowing to actually apply patches.
     ///
-    /// Returns `Err` if the locking fails.
+    /// Never fails, just staying backwards compatible.
     ///
     /// NOTE: The patcher should be dropped before executing non-patching related code,
     /// especially if there are hooks that can lead to additional patches. Otherwise a
     /// deadlock will occur. One possible issue is caused by using `patch_modules`, and
     /// loading another library while the `Patcher` is locked.
     pub fn lock(&self) -> Result<ActivePatcher, ()> {
-        let guard = try!(self.mutex.lock().map_err(|_| ()));
+        let guard = self.mutex.lock();
         Ok(ActivePatcher {
             state: guard
         })
