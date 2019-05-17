@@ -5,7 +5,7 @@ version = "0.2.0"
 
 [dependencies]
 byteorder = "1.2"
-lde = "0.2.0"
+lde = "0.3"
 libc = "0.2"
 smallvec = "0.6"
 

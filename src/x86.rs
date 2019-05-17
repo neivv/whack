@@ -7,7 +7,7 @@ use std::slice;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::io::Write;
 
-use lde::{self, InsnSet};
+use lde;
 use byteorder::{LE, LittleEndian, ReadBytesExt, WriteBytesExt};
 use smallvec::SmallVec;
 
@@ -965,7 +965,7 @@ impl AssemblerBuf {
 
 pub unsafe fn copy_instruction_length(ins: *const u8, min_length: usize) -> usize {
     let mut sum = 0;
-    for (opcode, _) in lde::x86::lde(slice::from_raw_parts(ins, min_length + 32), 0) {
+    for (opcode, _) in lde::X86.iter(slice::from_raw_parts(ins, min_length + 32), 0) {
         if sum >= min_length {
             break;
         }
@@ -980,7 +980,7 @@ unsafe fn copy_instructions_ignore_shortjmp(
     mut dst: *mut u8,
 ) {
     let mut len = src.len() as isize;
-    for (opcode, _) in lde::x86::lde(src, 0) {
+    for (opcode, _) in lde::X86.iter(src, 0) {
         if len <= 0 {
             return;
         }
@@ -1024,7 +1024,7 @@ unsafe fn copy_instructions(
     min_length: usize,
 ) {
     let mut len = min_length as isize;
-    for (opcode, _) in lde::x86::lde(slice::from_raw_parts(src, min_length + 32), 0) {
+    for (opcode, _) in lde::X86.iter(slice::from_raw_parts(src, min_length + 32), 0) {
         if len <= 0 {
             return;
         }
