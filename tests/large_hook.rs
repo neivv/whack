@@ -81,7 +81,7 @@ fn large_hook() {
                 move |a: u32, b: u32, c: u32, d: u32, e: u32,
                       f: u32, g: u32, h: u32, i: u32, j: u32,
                       k: u32, l: u32, m: u32,
-                      orig: &Fn(_, _, _, _, _,
+                      orig: &dyn Fn(_, _, _, _, _,
                                 _, _, _, _, _,
                                 _, _, _) -> _| {
                 orig(a + b, b, c + d, d, e + f, f, g + h, h, i + j, j, k + l, l, m)

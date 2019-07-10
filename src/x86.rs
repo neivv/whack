@@ -988,7 +988,7 @@ unsafe fn copy_instructions_ignore_shortjmp(
         // Relative jumps need to be handled differently
         match opcode[0] {
             0xf => match opcode[1] {
-                0x80 ... 0x8f => {
+                0x80 ..= 0x8f => {
                     ptr::copy_nonoverlapping(opcode.as_ptr(), dst, 6);
                     let diff = (dst as usize).wrapping_sub(opcode.as_ptr() as usize);
                     let value = read_unaligned::<usize>(dst.offset(2));
@@ -1032,7 +1032,7 @@ unsafe fn copy_instructions(
         match opcode[0] {
             0x0f => match opcode[1] {
                 // Long cond jump
-                0x80 ... 0x8f => {
+                0x80 ..= 0x8f => {
                     let diff = (dst_base as usize + dst.len())
                         .wrapping_sub(opcode.as_ptr() as usize);
                     dst.push(0xf);
@@ -1046,7 +1046,7 @@ unsafe fn copy_instructions(
                 }
             },
             // Short cond jump
-            0x70 ... 0x7f => {
+            0x70 ..= 0x7f => {
                 let diff = (dst_base as usize + dst.len() + 6)
                     .wrapping_sub(opcode.as_ptr() as usize + 2);
                 let offset = opcode[1] as i8 as u32;

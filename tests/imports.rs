@@ -27,7 +27,7 @@ thread_local!(static CLOSE_HANDLE_COUNT: Cell<u32> = Cell::new(0));
 thread_local!(static GET_PROFILE_INT_COUNT: Cell<u32> = Cell::new(0));
 thread_local!(static TICK_COUNT_CALLS: Cell<u32> = Cell::new(0));
 
-unsafe fn close_handle_log(handle: HANDLE, orig: &Fn(HANDLE) -> BOOL) -> BOOL {
+unsafe fn close_handle_log(handle: HANDLE, orig: &dyn Fn(HANDLE) -> BOOL) -> BOOL {
     CLOSE_HANDLE_COUNT.with(|x| x.set(x.get() + 1));
     orig(handle)
 }
@@ -64,7 +64,7 @@ fn import_hooking() {
         {
             let mut exe = locked.patch_exe(!0);
             tick_count_patch = exe.import_hook_closure(&b"kernel32"[..], GetTickCount,
-                move |orig: &Fn() -> _| {
+                move |orig: &dyn Fn() -> _| {
                 add_tick_count_call();
                 orig()
             });
@@ -73,7 +73,7 @@ fn import_hooking() {
         let mut patcher = locked.patch_exe(!0);
         let copy = value.clone();
         create_file_patch = patcher.import_hook_closure(&b"kernel32"[..], CreateFileW,
-            move |filename: *const u16, a, b, c, d, e, f, orig: &Fn(_, _, _, _, _, _, _) -> _| {
+            move |filename: *const u16, a, b, c, d, e, f, orig: &dyn Fn(_, _, _, _, _, _, _) -> _| {
             let prev = copy.fetch_add(1, Ordering::SeqCst);
             let mut modified = vec![0; 1024];
             let mut pos = 0;

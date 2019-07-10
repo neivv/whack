@@ -59,7 +59,7 @@ mod x86 {
                 active_patcher.inline_hook(
                     InlineDecl,
                     &inline,
-                    |a1: u32, a2, out: *mut u32, orig: &Fn(_, _, _)| {
+                    |a1: u32, a2, out: *mut u32, orig: &dyn Fn(_, _, _)| {
                         assert_eq!(a1, a2);
                         orig(a1, 4, out);
                         assert_eq!(*out, (a1 + 4).wrapping_sub(0x777));
