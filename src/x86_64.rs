@@ -4,7 +4,7 @@ use std::slice;
 use std::io::Write;
 
 use lde;
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{LE, ReadBytesExt, WriteBytesExt};
 use smallvec::SmallVec;
 
 use helpers::*;
@@ -534,18 +534,15 @@ impl AssemblerBuf {
     }
 
     pub unsafe fn copy_instructions(&mut self, source: *const u8, amt: usize) {
-        self.buf.reserve(amt);
-        copy_instructions(self.buf.as_mut_ptr().offset(self.buf.len() as isize), source, amt);
-        let new_len = self.buf.len() + amt;
-        self.buf.set_len(new_len);
+        copy_instructions(source, &mut self.buf, amt);
     }
 
     fn write_fixups(&mut self) -> ConstOffsets {
         let const_offset_begin = self.buf.len() + self.fixups.len() * 8;
         for &(fixup, value) in self.fixups.iter().chain(self.constants.iter()) {
             let offset = self.buf.len() - fixup - 4;
-            self.buf.write_u64::<LittleEndian>(value).unwrap();
-            (&mut self.buf[fixup .. fixup + 4]).write_u32::<LittleEndian>(offset as u32).unwrap();
+            self.buf.write_u64::<LE>(value).unwrap();
+            (&mut self.buf[fixup .. fixup + 4]).write_u32::<LE>(offset as u32).unwrap();
         }
         self.align(16);
         ConstOffsets(const_offset_begin)
@@ -556,7 +553,7 @@ impl AssemblerBuf {
         ptr::copy_nonoverlapping(self.buf.as_ptr(), out, self.buf.len());
         for &(fixup, value) in self.fixups.iter() {
             let value_pos = fixup + 4 +
-                (&self.buf[fixup .. fixup + 4]).read_u32::<LittleEndian>().unwrap() as usize;
+                (&self.buf[fixup .. fixup + 4]).read_u32::<LE>().unwrap() as usize;
             write_unaligned(out.offset(value_pos as isize), value.wrapping_add(diff as u64));
         }
     }
@@ -566,12 +563,12 @@ impl AssemblerBuf {
             AsmValue::Undecided => {
                 self.buf.write_all(&[0xff, 0x35]).unwrap();
                 self.fixups.push((self.buf.len(), 0));
-                self.buf.write_u32::<LittleEndian>(0).unwrap();
+                self.buf.write_u32::<LE>(0).unwrap();
             }
             AsmValue::Constant(val) => {
                 self.buf.write_all(&[0xff, 0x35]).unwrap();
                 self.constants.push((self.buf.len(), val));
-                self.buf.write_u32::<LittleEndian>(0).unwrap();
+                self.buf.write_u32::<LE>(0).unwrap();
             }
             AsmValue::Register(reg) => {
                 if reg >= 8 {
@@ -590,7 +587,7 @@ impl AssemblerBuf {
                     }
                     x => {
                         self.buf.write_all(&[0xff, 0xb4, 0xe4]).unwrap();
-                        self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
+                        self.buf.write_u32::<LE>(x as u32).unwrap();
                     }
                 }
             }
@@ -663,7 +660,7 @@ impl AssemblerBuf {
                     }
                     x => {
                         self.buf.write_all(&[0x8b, 0x84 + (to & 7) * 8, 0xe4]).unwrap();
-                        self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
+                        self.buf.write_u32::<LE>(x as u32).unwrap();
                     }
                 }
             }
@@ -673,13 +670,13 @@ impl AssemblerBuf {
                 self.buf.write_u8(0x8b).unwrap();
                 self.buf.write_u8(0x5 + (to & 7) * 8).unwrap();
                 self.fixups.push((self.buf.len(), 0));
-                self.buf.write_u32::<LittleEndian>(0).unwrap();
+                self.buf.write_u32::<LE>(0).unwrap();
             }
             (AsmValue::Register(to), AsmValue::Constant(val)) => {
                 let reg_spec_byte = 0x48 + if to >= 8 { 4 } else { 0 };
                 self.buf.write_all(&[reg_spec_byte, 0x8b, (to & 7) * 8 + 0x5]).unwrap();
                 self.constants.push((self.buf.len(), val));
-                self.buf.write_u32::<LittleEndian>(0).unwrap();
+                self.buf.write_u32::<LE>(0).unwrap();
             }
             (_, _) => unimplemented!(),
         }
@@ -693,7 +690,7 @@ impl AssemblerBuf {
             }
             x => {
                 self.buf.write_all(&[0x48, 0x81, 0xc4]).unwrap();
-                self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
+                self.buf.write_u32::<LE>(x as u32).unwrap();
             }
         }
         self.stack_offset -= value as i32;
@@ -707,7 +704,7 @@ impl AssemblerBuf {
             }
             x => {
                 self.buf.write_all(&[0x48, 0x81, 0xec]).unwrap();
-                self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
+                self.buf.write_u32::<LE>(x as u32).unwrap();
             }
         }
         self.stack_offset += value as i32;
@@ -718,7 +715,7 @@ impl AssemblerBuf {
             self.buf.write_u8(0xc3).unwrap();
         } else {
             self.buf.write_u8(0xc2).unwrap();
-            self.buf.write_u16::<LittleEndian>(stack_pop as u16).unwrap();
+            self.buf.write_u16::<LE>(stack_pop as u16).unwrap();
         }
     }
 
@@ -727,7 +724,7 @@ impl AssemblerBuf {
             AsmValue::Constant(dest) => {
                 self.buf.write_all(&[0xff, 0x25]).unwrap();
                 self.constants.push((self.buf.len(), dest));
-                self.buf.write_u32::<LittleEndian>(0).unwrap();
+                self.buf.write_u32::<LE>(0).unwrap();
             }
             AsmValue::Register(dest) => {
                 if dest >= 8 {
@@ -757,15 +754,51 @@ impl AssemblerBuf {
     fn call_const(&mut self, val: u64) -> ConstOffset{
         self.buf.write_all(&[0xff, 0x15]).unwrap();
         self.constants.push((self.buf.len(), val));
-        self.buf.write_u32::<LittleEndian>(0).unwrap();
+        self.buf.write_u32::<LE>(0).unwrap();
         ConstOffset(self.constants.len() - 1)
     }
 }
 
-unsafe fn copy_instructions(to: *mut u8, from: *const u8, min_len: usize) -> usize {
-    let len = ins_len(from, min_len);
-    ::std::ptr::copy_nonoverlapping(from, to, len);
-    len
+// Dst_base is the address at which the code is *imagined* to be at, so it won't matter if
+// the vector is reallocated.
+//
+// (The rest of the code doesn't actually work with that yet though)
+unsafe fn copy_instructions(
+    src: *const u8,
+    dst: &mut Vec<u8>,
+    min_length: usize,
+) {
+    let mut len = min_length as isize;
+    let mut pos = src;
+    for (opcode, _) in lde::X64.iter(slice::from_raw_parts(src, min_length + 32), 0) {
+        if len <= 0 {
+            return;
+        }
+        let ins_len = opcode.len() as isize;
+        if opcode.len() == 7 && &opcode[..3] == [0x48, 0xff, 0x25] {
+            // Jmp [rip + offset],
+            // replace with jmp [rip + 7]; db xxxx_xxxx_xxxx_xxxx
+            dst.extend_from_slice(&[0x48, 0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
+            let offset = *(pos.add(3) as *const i32);
+            let dest = *(pos.offset(offset as isize + 7) as *const u64);
+            dst.write_u64::<LE>(dest).unwrap();
+        } else if opcode[0] == 0xe9 {
+            // Long jump
+            // replace with jmp [rip + 7]; db xxxx_xxxx_xxxx_xxxx
+            dst.extend_from_slice(&[0x48, 0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
+            let offset = *(pos.add(1) as *const i32);
+            let dest = ((pos as isize + 5).wrapping_add(offset as isize)) as u64;
+            dst.write_u64::<LE>(dest).unwrap();
+        } else {
+            let slice = slice::from_raw_parts(opcode.as_ptr(), ins_len as usize);
+            dst.extend_from_slice(slice);
+        }
+        pos = pos.offset(ins_len);
+        len -= ins_len;
+    }
+    if len != 0 {
+        panic!("Could not disassemble {:x}", src as usize);
+    }
 }
 
 pub unsafe fn ins_len(ins: *const u8, min_length: usize) -> usize {
