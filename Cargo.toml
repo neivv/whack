@@ -7,7 +7,7 @@ version = "0.2.0"
 byteorder = "1.2"
 lde = "0.3"
 libc = "0.2"
-parking_lot = "0.8"
+parking_lot = "0.9"
 smallvec = "0.6"
 
 [dependencies.winapi]
