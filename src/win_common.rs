@@ -96,7 +96,7 @@ impl MemoryProtection {
         let start = start as *const _;
         let mut protections = Vec::new();
         unsafe {
-            let mut mem_info: winnt::MEMORY_BASIC_INFORMATION = mem::uninitialized();
+            let mut mem_info: winnt::MEMORY_BASIC_INFORMATION = mem::zeroed();
             let mut tmp = 0;
             VirtualQuery(start, &mut mem_info, mem::size_of_val(&mem_info) as _);
             let init_type = mem_info.Type;
