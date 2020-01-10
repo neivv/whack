@@ -27,7 +27,7 @@ thread_local!(static CLOSE_HANDLE_COUNT: Cell<u32> = Cell::new(0));
 thread_local!(static GET_PROFILE_INT_COUNT: Cell<u32> = Cell::new(0));
 thread_local!(static TICK_COUNT_CALLS: Cell<u32> = Cell::new(0));
 
-unsafe fn close_handle_log(handle: HANDLE, orig: &dyn Fn(HANDLE) -> BOOL) -> BOOL {
+unsafe fn close_handle_log(handle: HANDLE, orig: unsafe extern fn(HANDLE) -> BOOL) -> BOOL {
     CLOSE_HANDLE_COUNT.with(|x| x.set(x.get() + 1));
     orig(handle)
 }
@@ -63,17 +63,20 @@ fn import_hooking() {
         let mut locked = root_patcher.lock().unwrap();
         {
             let mut exe = locked.patch_exe(!0);
-            tick_count_patch = exe.import_hook_closure(&b"kernel32"[..], GetTickCount,
-                move |orig: &dyn Fn() -> _| {
-                add_tick_count_call();
-                orig()
-            });
+            tick_count_patch = exe.import_hook_closure(
+                &b"kernel32"[..],
+                GetTickCount,
+                move |orig| {
+                    add_tick_count_call();
+                    unsafe { orig() }
+                },
+            );
             exe.apply_disabled();
         }
         let mut patcher = locked.patch_exe(!0);
         let copy = value.clone();
         create_file_patch = patcher.import_hook_closure(&b"kernel32"[..], CreateFileW,
-            move |filename: *const u16, a, b, c, d, e, f, orig: &dyn Fn(_, _, _, _, _, _, _) -> _| {
+            move |filename: *const u16, a, b, c, d, e, f, orig| {
             let prev = copy.fetch_add(1, Ordering::SeqCst);
             let mut modified = vec![0; 1024];
             let mut pos = 0;
@@ -89,7 +92,7 @@ fn import_hooking() {
                 modified[pos - 2] = b'b' as u16;
                 modified[pos - 3] = b'a' as u16;
             }
-            orig(modified.as_ptr(), a, b, c, d, e, f)
+            unsafe { orig(modified.as_ptr(), a, b, c, d, e, f) }
         });
         patcher.import_hook_opt(&b"kernel32"[..], CloseHandle, close_handle_log);
         patcher.import_hook(&b"kernel32"[..], GetProfileIntW, hook_without_orig);

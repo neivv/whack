@@ -29,8 +29,8 @@ macro_rules! whack_impl_addr_hook {
     {
         whack_maybe_pub_struct!($is_pub, $name);
         whack_hook_impl_private!(no, $stdcall, $name, $ret, $([$an @ $aloc($apos): $aty])*);
-        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static>
-            $crate::AddressHookClosure<T> for $name
+        impl<T> $crate::AddressHookClosure<T> for $name
+        where T: Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret + Sized + 'static,
         {
             fn address() -> usize {
                 ($addr as usize).checked_sub($base).unwrap()
@@ -60,7 +60,9 @@ macro_rules! whack_impl_import_hook {
      $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
         whack_maybe_pub_struct!($is_pub, $name);
         whack_hook_impl_private!(yes, true, $name, $ret, $([$an @ $aloc($apos): $aty])*);
-        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static> $crate::ExportHookClosure<T> for $name {
+        impl<T> $crate::ExportHookClosure<T> for $name
+        where T: Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret + Sized + 'static,
+        {
             fn default_export() -> $crate::Export<'static> {
                 if $ord as i32 == -1 {
                     let name = stringify!($name);
@@ -93,17 +95,14 @@ macro_rules! whack_hook_impl_private {
             // then it'll go hook -> out_wrap -> assembly -> original.
             // Orig is pointer to the assembly wrapper which calls original function,
             // Real is pointer to the fat pointer of hook Fn(...).
-            extern fn in_wrap($($an: $aty,)*
-                              orig: extern fn($($aty),*) -> $ret,
-                              real: *const *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret
-                             ) -> $ret
-            {
-                let real: &Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret = unsafe { &**real };
-                real($($an,)* &|$($an),*| $name::out_wrap($($an,)* orig))
-            }
-
-            extern fn out_wrap($($an: $aty,)* orig: extern fn($($aty),*) -> $ret) -> $ret {
-                orig($($an),*)
+            extern fn in_wrap(
+                $($an: $aty,)*
+                orig: extern fn($($aty),*) -> $ret,
+                real: *const *const Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret,
+            ) -> $ret {
+                let real: &Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret =
+                    unsafe { &**real };
+                real($($an,)* orig)
             }
 
             #[allow(unused_mut)]
@@ -127,16 +126,17 @@ macro_rules! whack_hook_wrapper_impl {
         #[cfg_attr(feature = "cargo-clippy", allow(cast_ptr_alignment))]
         fn write_target_objects(target: T) -> Box<[u8]> {
             unsafe {
-                let fat_ptr_size =
-                    ::std::mem::size_of::<*const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret>();
+                let fat_ptr_size = ::std::mem::size_of::<
+                    *const Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret
+                >();
                 let size = ::std::mem::size_of::<T>() + fat_ptr_size;
                 let out = vec![0u8; size].into_boxed_slice();
 
                 let target_mem = out.as_ptr().offset(fat_ptr_size as isize) as *mut T;
                 ::std::ptr::write_unaligned(target_mem, target);
-                let target_ptr: *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret = target_mem;
+                let target_ptr = target_mem;
                 ::std::ptr::write_unaligned(
-                    out.as_ptr() as *mut *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret,
+                    out.as_ptr() as *mut *const Fn($($aty,)* _) -> $ret,
                     target_ptr,
                 );
                 out

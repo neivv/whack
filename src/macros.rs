@@ -46,16 +46,18 @@ pub trait ExportHookClosure<Callback>: ExportHook {
 pub trait ExportHook {
     type Fnptr;
     type OptFnptr;
-    fn import(self,
-              patch: &mut ::ModulePatcher,
-              dll: Cow<'static, [u8]>,
-              val: Self::Fnptr
-              ) -> Patch;
-    fn import_opt(self,
-                  patch: &mut ::ModulePatcher,
-                  dll: Cow<'static, [u8]>,
-                  val: Self::OptFnptr
-                  ) -> Patch;
+    fn import(
+        self,
+        patch: &mut ::ModulePatcher,
+        dll: Cow<'static, [u8]>,
+        val: Self::Fnptr,
+    ) -> Patch;
+    fn import_opt(
+        self,
+        patch: &mut ::ModulePatcher,
+        dll: Cow<'static, [u8]>,
+        val: Self::OptFnptr,
+    ) -> Patch;
     fn wrapper_assembler(target: *const u8) -> ::platform::HookWrapAssembler;
 }
 
@@ -84,8 +86,11 @@ pub trait ExportHook {
 ///         // Calling IsDebuggerPresent from a library or with GetProcAddress will
 ///         // still work though.
 ///         let mut exe = active_patcher.patch_exe(!0);
-///         exe.import_hook_closure(&b"kernel32"[..], IsDebuggerPresent,
-///             |_orig: &Fn() -> _| { 0 });
+///         exe.import_hook_closure(
+///             &b"kernel32"[..],
+///             IsDebuggerPresent,
+///             |_orig: unsafe extern fn() -> _| { 0 },
+///         );
 ///     }
 ///     // Note: Dropping `Patcher` is supposed to revert the patches,
 ///     // though it doesn't currently work.
@@ -128,7 +133,7 @@ macro_rules! whack_hook_decls {
 macro_rules! whack_impl_hook_decl {
     ($name:ident, $ret:ty, $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
         pub struct $name;
-        impl<T: Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret + Sized + 'static>
+        impl<T: Fn($($aty,)* &dyn Fn($($aty),*) -> $ret) -> $ret + Sized + 'static>
             $crate::HookDeclClosure<T> for $name
         {
             whack_hook_wrapper_impl!($ret, $([$aty])*);
@@ -153,10 +158,11 @@ macro_rules! whack_impl_hook_decl {
             extern fn in_wrap_inline(
                 $($an: $aty,)*
                 orig: extern fn(*mut $crate::platform::InlineCallCtx, $($aty),*) -> $ret,
-                real: *const *const Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret,
+                real: *const *const Fn($($aty,)* &dyn Fn($($aty),*) -> $ret) -> $ret,
                 params: *mut $crate::platform::InlineCallCtx,
             ) -> () {
-                let real: &Fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret = unsafe { &**real };
+                let real: &Fn($($aty,)* &dyn Fn($($aty),*) -> $ret) -> $ret =
+                    unsafe { &**real };
                 real($($an,)* &|$($an),*| {
                     unsafe {
                         (*params).init_stack_copy_size();
@@ -200,24 +206,24 @@ macro_rules! whack_address_hook {
 macro_rules! whack_addr_hook_common {
     ($ret:ty, [$($aty:ty),*], [$($an:ident),*]) => {
         type Fnptr = unsafe fn($($aty),*) -> $ret;
-        type OptFnptr = unsafe fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
+        type OptFnptr = unsafe fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret;
         unsafe fn hook(self, patch: &mut $crate::ModulePatcher, val: Self::Fnptr) -> $crate::Patch
         {
-            patch.hook_closure(self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
+            patch.hook_closure(self, move |$($an,)* _: unsafe extern fn($($aty),*) -> $ret| {
                 val($($an),*)
             })
         }
 
         unsafe fn hook_opt(self, patch: &mut $crate::ModulePatcher, val: Self::OptFnptr) -> $crate::Patch
         {
-            patch.hook_closure(self, move |$($an,)* orig: &Fn($($aty),*) -> $ret| {
+            patch.hook_closure(self, move |$($an,)* orig: unsafe extern fn($($aty),*) -> $ret| {
                 val($($an,)* orig)
             })
         }
 
         unsafe fn call_hook(self, patch: &mut $crate::ModulePatcher, val: Self::Fnptr) -> $crate::Patch
         {
-            patch.call_hook_closure(self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
+            patch.call_hook_closure(self, move |$($an,)* _: unsafe extern fn($($aty),*) -> $ret| {
                 val($($an),*)
             })
         }
@@ -242,7 +248,7 @@ macro_rules! whack_addr_hook_common {
                 entry.wrapper
             }
 
-            let target = move |$($an,)* _: &Fn($($aty),*) -> $ret| {
+            let target = move |$($an,)* _: unsafe extern fn($($aty),*) -> $ret| {
                 val($($an),*)
             };
 
@@ -256,26 +262,35 @@ macro_rules! whack_addr_hook_common {
 macro_rules! whack_export_hook_common {
     ($ret:ty, [$($aty:ty),*], [$($an:ident),*]) => {
         type Fnptr = unsafe fn($($aty),*) -> $ret;
-        type OptFnptr = unsafe fn($($aty,)* &Fn($($aty),*) -> $ret) -> $ret;
-        fn import(self,
-                  patch: &mut $crate::ModulePatcher,
-                  lib: ::std::borrow::Cow<'static, [u8]>,
-                  val: Self::Fnptr
-                 ) -> $crate::Patch
-        {
-            patch.import_hook_closure(lib, self, move |$($an,)* _: &Fn($($aty),*) -> $ret| {
-                unsafe { val($($an),*) }
-            })
+        type OptFnptr = unsafe fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret;
+        fn import(
+            self,
+            patch: &mut $crate::ModulePatcher,
+            lib: ::std::borrow::Cow<'static, [u8]>,
+            val: Self::Fnptr,
+        ) -> $crate::Patch {
+            patch.import_hook_closure(
+                lib,
+                self,
+                move |$($an,)* _: unsafe extern fn($($aty),*) -> $ret| {
+                    unsafe { val($($an),*) }
+                }
+            )
         }
-        fn import_opt(self,
-                      patch: &mut $crate::ModulePatcher,
-                      lib: ::std::borrow::Cow<'static, [u8]>,
-                      val: Self::OptFnptr
-                     ) -> $crate::Patch
-        {
-            patch.import_hook_closure(lib, self, move |$($an,)* orig: &Fn($($aty),*) -> $ret| {
-                unsafe { val($($an,)* orig) }
-            })
+
+        fn import_opt(
+            self,
+            patch: &mut $crate::ModulePatcher,
+            lib: ::std::borrow::Cow<'static, [u8]>,
+            val: Self::OptFnptr,
+        ) -> $crate::Patch {
+            patch.import_hook_closure(
+                lib,
+                self,
+                move |$($an,)* orig: unsafe extern fn($($aty),*) -> $ret| {
+                    unsafe { val($($an,)* orig) }
+                },
+            )
         }
     }
 }
