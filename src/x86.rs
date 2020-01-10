@@ -118,7 +118,7 @@ pub struct FuncAssembler {
     // e.g. fn(@stack(2) i32, @eax i32, @ecx i32, @stack(1) i32)
     // would have (0, 2), (3, 1).
     current_stack: SmallVec<[(u8, u8); 8]>,
-    preserved_regs: SmallVec<[(u8); 8]>,
+    preserved_regs: SmallVec<[u8; 8]>,
     arg_num: u8,
     func_offsets: Vec<usize>,
     offset_pos: usize,
