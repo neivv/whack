@@ -82,10 +82,9 @@ pub trait ExportHook {
 /// fn hide_debugger() {
 ///     let mut patcher = whack::Patcher::new();
 ///     {
-///         let mut active_patcher = patcher.lock().unwrap();
 ///         // Calling IsDebuggerPresent from a library or with GetProcAddress will
 ///         // still work though.
-///         let mut exe = active_patcher.patch_exe(!0);
+///         let mut exe = patcher.patch_exe(!0);
 ///         exe.import_hook_closure(
 ///             &b"kernel32"[..],
 ///             IsDebuggerPresent,
@@ -318,8 +317,7 @@ macro_rules! whack_export_hook_common {
 /// fn access_variables() {
 ///     let mut patcher = whack::Patcher::new();
 ///     {
-///         let mut active_patcher = patcher.lock().unwrap();
-///         let mut patcher = active_patcher.patch_exe(!0);
+///         let mut patcher = patcher.patch_exe(!0);
 ///         unsafe {
 ///             init_vars(&mut patcher);
 ///         }
@@ -399,8 +397,7 @@ macro_rules! whack_vars {
 /// fn use_funcs() {
 ///     let mut patcher = whack::Patcher::new();
 ///     {
-///         let mut active_patcher = patcher.lock().unwrap();
-///         let mut patcher = active_patcher.patch_exe(0);
+///         let mut patcher = patcher.patch_exe(0);
 ///         unsafe {
 ///             fun::init_funcs(&mut patcher);
 ///         }

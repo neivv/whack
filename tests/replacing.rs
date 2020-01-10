@@ -70,9 +70,8 @@ fn replace() {
 
         let mut patches = vec![];
 
-        let patcher = Patcher::new();
+        let mut patcher = Patcher::new();
         {
-            let mut patcher = patcher.lock().unwrap();
             let mut patcher = patcher.patch_library(dll_name(), addr::BASE);
             let patch = patcher.replace_val(addr::FUNC1, 0x123u32);
             patches.push(patch);
@@ -89,11 +88,8 @@ fn replace() {
         let result = func3(3, 3, 3, 3, 3);
         assert_eq!(result, 3);
 
-        {
-            let mut patcher = patcher.lock().unwrap();
-            patcher.disable_patch(&patches[0]);
-            patcher.disable_patch(&patches[2]);
-        }
+        patcher.disable_patch(&patches[0]);
+        patcher.disable_patch(&patches[2]);
 
         let result = func(7, 9, 2, 10, 1);
         assert_eq!(result, 3937053400);

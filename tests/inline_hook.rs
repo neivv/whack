@@ -18,11 +18,10 @@ mod x86 {
     #[test]
     fn inline_hook() {
         unsafe {
-            let patcher = Patcher::new();
-            let mut active = patcher.lock().unwrap();
+            let mut patcher = Patcher::new();
             let (code, entry, exit, inline_parent_entry) = read_code();
             let mem = {
-                let mut p = active.patch_exe(0);
+                let mut p = patcher.patch_exe(0);
                 p.exec_alloc(code.len())
             };
             mem.copy_from_slice(&code);
@@ -51,7 +50,7 @@ mod x86 {
             };
 
             let hook = {
-                let mut active_patcher = active.patch_memory(
+                let mut active_patcher = patcher.patch_memory(
                     mem.as_ptr() as *mut _,
                     mem.as_ptr() as *mut _,
                     !0,
@@ -81,7 +80,7 @@ mod x86 {
             }
             assert_eq!(val, 8);
             {
-                active.disable_patch(&hook);
+                patcher.disable_patch(&hook);
             }
             let val = func(1, 2, result.as_mut_ptr());
             assert_eq!(result[0], ((6u32 ^ 0x50) * 2).wrapping_sub(0x777));

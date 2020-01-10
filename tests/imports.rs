@@ -56,13 +56,12 @@ fn import_hooking() {
     }
 
     let value = Rc::new(AtomicUsize::new(0));
-    let root_patcher = Patcher::new();
+    let mut root_patcher = Patcher::new();
     let create_file_patch;
     let tick_count_patch;
     {
-        let mut locked = root_patcher.lock().unwrap();
         {
-            let mut exe = locked.patch_exe(!0);
+            let mut exe = root_patcher.patch_exe(!0);
             tick_count_patch = exe.import_hook_closure(
                 &b"kernel32"[..],
                 GetTickCount,
@@ -73,7 +72,7 @@ fn import_hooking() {
             );
             exe.apply_disabled();
         }
-        let mut patcher = locked.patch_exe(!0);
+        let mut patcher = root_patcher.patch_exe(!0);
         let copy = value.clone();
         create_file_patch = patcher.import_hook_closure(&b"kernel32"[..], CreateFileW,
             move |filename: *const u16, a, b, c, d, e, f, orig| {
@@ -115,8 +114,7 @@ fn import_hooking() {
         std::fs::remove_file("file.abc").unwrap();
     }
     {
-        let mut locked = root_patcher.lock().unwrap();
-        unsafe { locked.disable_patch(&create_file_patch); }
+        unsafe { root_patcher.disable_patch(&create_file_patch); }
     }
     value.store(0, Ordering::SeqCst);
     unsafe {
@@ -127,8 +125,7 @@ fn import_hooking() {
         std::fs::remove_file("file.dat").unwrap();
     }
     {
-        let mut locked = root_patcher.lock().unwrap();
-        unsafe { locked.enable_patch(&create_file_patch); }
+        unsafe { root_patcher.enable_patch(&create_file_patch); }
     }
     value.store(0, Ordering::SeqCst);
     unsafe {
@@ -141,8 +138,7 @@ fn import_hooking() {
     unsafe { sysinfoapi::GetTickCount(); }
     assert_eq!(get_tick_count_calls(), 0);
     {
-        let mut locked = root_patcher.lock().unwrap();
-        unsafe { locked.enable_patch(&tick_count_patch); }
+        unsafe { root_patcher.enable_patch(&tick_count_patch); }
     }
     let prev = get_tick_count_calls();
     unsafe { sysinfoapi::GetTickCount(); }
