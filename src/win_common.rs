@@ -1,6 +1,5 @@
 //! Common windows code for both x86 and x86_64.
 
-use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
@@ -139,6 +138,7 @@ impl Drop for MemoryProtection {
 
 pub unsafe fn import_addr(module: HMODULE, func_dll: &[u8], func: &Export) -> Option<*mut usize>
 {
+    let mut buf;
     let func_dll_with_extension = {
         let has_extension = {
             if func_dll.len() <= 4 {
@@ -148,11 +148,14 @@ pub unsafe fn import_addr(module: HMODULE, func_dll: &[u8], func: &Export) -> Op
             }
         };
         if has_extension {
-            Cow::Borrowed(func_dll)
+            func_dll
         } else {
-            Cow::Owned(func_dll.iter().cloned().chain(b".dll".iter().cloned()).collect())
+            buf = Vec::with_capacity(func_dll.len() + 4);
+            buf.extend_from_slice(func_dll);
+            buf.extend_from_slice(b".dll");
+            &buf[..]
         }
     };
 
-    pe::import_ptr(module as usize, &func_dll_with_extension, func)
+    pe::import_ptr(module as usize, func_dll_with_extension, func)
 }
