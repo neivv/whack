@@ -1,7 +1,4 @@
-use std::ffi::CStr;
-use std::os::raw::c_char;
-
-use ::Export;
+use crate::Export;
 
 const DOS_MAGIC: u16 = 0x5a4d;
 const PE_MAGIC: u32 = 0x4550;
@@ -12,62 +9,69 @@ unsafe fn read_at<Ty: Copy>(offset: usize) -> Ty {
 
 /// Gets pointer to the import table of an image which has been loaded to memory.
 /// Preconditions: `image_base` must be address of first byte of the image (MS-DOS header).
-pub unsafe fn import_ptr(image_base: usize,
-                         dll_name: &[u8],
-                         import: &Export
-                         ) -> Option<*mut usize>
-{
-    import_table(image_base).and_then(|(imps, size, is_64)| {
+pub unsafe fn import_ptr(
+    image_base: usize,
+    dll_name: &[u8],
+    import: &Export,
+) -> Option<*mut usize> {
+    let (imps, size, is_64) = import_table(image_base)?;
+
+    let lookups;
+    let addresses;
+
+    'outer: loop {
         let mut pos = 0;
         while pos + 0x14 <= size {
             let name_offset = read_at::<u32>(imps + pos as usize + 0xc) as usize;
             if name_offset == 0 {
                 return None;
             }
-            let name_addr = image_base + name_offset;
-            let name = CStr::from_ptr(name_addr as *const c_char);
-            if name.to_bytes().eq_ignore_ascii_case(dll_name) {
-                let lookups = image_base + read_at::<u32>(imps + pos as usize) as usize;
-                let addresses = image_base + read_at::<u32>(imps + pos as usize + 0x10) as usize;
-                return Some((lookups, addresses, is_64));
+            let name_addr = (image_base + name_offset) as *const u8;
+            let name_len = (0..).find(|&i| *name_addr.add(i) == 0).unwrap_or(0);
+            let name = std::slice::from_raw_parts(name_addr, name_len);
+            if name.eq_ignore_ascii_case(dll_name) {
+                lookups = image_base + read_at::<u32>(imps + pos as usize) as usize;
+                addresses = image_base + read_at::<u32>(imps + pos as usize + 0x10) as usize;
+                break 'outer;
             }
             pos += 0x14;
         }
-        None
-    }).and_then(|(lookups, addresses, is_64)| {
-        let mut pos = 0;
-        loop {
-            let val = if is_64 {
-                // PE32+ has the high bits unused anyways, other than
-                // the highest one which is the name/ordinal bool bool.
-                let val = read_at::<u32>(lookups + pos);
-                let high = read_at::<u32>(lookups + pos + 4);
-                val | (high & 0x8000_0000)
-            } else {
-                read_at::<u32>(lookups + pos)
-            };
-            if val == 0 {
-                return None;
-            }
-            match *import {
-                Export::Name(name) => {
-                    if val & 0x8000_0000 == 0 {
-                        let name_addr = image_base + val as usize + 2;
-                        let func_name = CStr::from_ptr(name_addr as *const c_char);
-                        if func_name.to_bytes() == name {
-                            return Some((addresses + pos) as *mut usize);
-                        }
-                    }
-                }
-                Export::Ordinal(ord) => {
-                    if val & 0x8000_0000 != 0 && (val & 0xffff) as u16 == ord {
+        return None;
+    }
+
+    let mut pos = 0;
+    loop {
+        let val = if is_64 {
+            // PE32+ has the high bits unused anyways, other than
+            // the highest one which is the name/ordinal bool bool.
+            let val = read_at::<u32>(lookups + pos);
+            let high = read_at::<u32>(lookups + pos + 4);
+            val | (high & 0x8000_0000)
+        } else {
+            read_at::<u32>(lookups + pos)
+        };
+        if val == 0 {
+            return None;
+        }
+        match *import {
+            Export::Name(name) => {
+                if val & 0x8000_0000 == 0 {
+                    let name_addr = (image_base + val as usize + 2) as *const u8;
+                    let name_len = (0..).find(|&i| *name_addr.add(i) == 0).unwrap_or(0);
+                    let func_name = std::slice::from_raw_parts(name_addr, name_len);
+                    if func_name == name {
                         return Some((addresses + pos) as *mut usize);
                     }
                 }
             }
-            pos += if is_64 { 0x8 } else { 0x4 };
+            Export::Ordinal(ord) => {
+                if val & 0x8000_0000 != 0 && (val & 0xffff) as u16 == ord {
+                    return Some((addresses + pos) as *mut usize);
+                }
+            }
         }
-    })
+        pos += if is_64 { 0x8 } else { 0x4 };
+    }
 }
 
 unsafe fn import_table(image_base: usize) -> Option<(usize, u32, bool)> {
