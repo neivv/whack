@@ -173,6 +173,12 @@ impl AsmValue {
     }
 }
 
+struct InlineTlsValues {
+    tls_id: u32,
+    set_inline_tls: u32,
+    inline_tls_pop_enabled: u32,
+}
+
 impl HookWrapAssembler {
     pub fn new(rust_in_wrapper: *const u8, target: *const u8, stdcall: bool) -> HookWrapAssembler
     {
@@ -192,7 +198,12 @@ impl HookWrapAssembler {
     /// Returns the buffer and possible offset for fixup original ptr for import hooks.
     pub fn generate_wrapper_code(&self, orig: OrigFuncCallback) -> HookWrapCode {
         let mut buffer = AssemblerBuf::new();
-        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, !0, orig);
+        let dummy = InlineTlsValues {
+            tls_id: 0,
+            set_inline_tls: 0,
+            inline_tls_pop_enabled: 0,
+        };
+        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, &dummy, orig);
         // Only write out wrappers when needed
         let delayed_out = match orig {
             OrigFuncCallback::Overwritten(orig) => {
@@ -227,17 +238,21 @@ impl HookWrapAssembler {
         parent: *const u8,
     ) -> HookWrapCode {
         let mut buffer = AssemblerBuf::new();
-        let tls_id = new_inline_tls_id() as u32;
         let orig = OrigFuncCallback::Inline(entry, exit, parent);
-        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, tls_id, orig);
+        let tls_values = InlineTlsValues {
+            tls_id: new_inline_tls_id() as u32,
+            set_inline_tls: cast_fnptr_usize(set_inline_tls as usize),
+            inline_tls_pop_enabled: cast_fnptr_usize(inline_tls_pop_enabled as usize),
+        };
+        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, &tls_values, orig);
         let mut parent_hook_offset = 0;
 
         self.write_inline_out_wrapper(&mut buffer, out_wrapper_pos, entry);
         let exit_wrapper_offset = buffer.len();
-        self.write_inline_exit_hook(&mut buffer, tls_id, exit);
+        self.write_inline_exit_hook(&mut buffer, tls_values.tls_id, exit);
         if !parent.is_null() {
             parent_hook_offset = buffer.len();
-            self.write_inline_parent_hook(&mut buffer, tls_id, parent);
+            self.write_inline_parent_hook(&mut buffer, tls_values.tls_id, parent);
         }
         HookWrapCode {
             buf: buffer,
@@ -251,7 +266,8 @@ impl HookWrapAssembler {
     fn write_in_wrapper(
         &self,
         buffer: &mut AssemblerBuf,
-        tls_id: u32,
+        // Dummy values if no inline
+        inline_tls: &InlineTlsValues,
         orig: OrigFuncCallback,
     ) -> AsmFixupPos {
         match orig {
@@ -261,9 +277,9 @@ impl HookWrapAssembler {
             OrigFuncCallback::Inline(..) => {
                 buffer.pushad();
                 // It'll also alloc space for InlineCallCtx::stack_copy_size with this push
-                buffer.push(AsmValue::Constant(tls_id));
+                buffer.push(AsmValue::Constant(inline_tls.tls_id));
                 buffer.push(AsmValue::Register(4));
-                buffer.call(AsmValue::Constant(cast_fnptr_usize(set_inline_tls as usize)));
+                buffer.call(AsmValue::Constant(inline_tls.set_inline_tls));
                 buffer.stack_add(8);
                 buffer.popad();
                 buffer.stack_sub(0x28);
@@ -292,9 +308,9 @@ impl HookWrapAssembler {
                 }
             }
             OrigFuncCallback::Inline(_, exit, _) => {
-                buffer.push(AsmValue::Constant(tls_id));
+                buffer.push(AsmValue::Constant(inline_tls.tls_id));
                 buffer.call(
-                    AsmValue::Constant(cast_fnptr_usize(inline_tls_pop_enabled as usize))
+                    AsmValue::Constant(inline_tls.inline_tls_pop_enabled)
                 );
                 buffer.stack_add(8);
                 buffer.popad();
