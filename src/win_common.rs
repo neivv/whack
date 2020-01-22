@@ -2,7 +2,6 @@
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
-use std::io;
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
@@ -10,6 +9,7 @@ use std::ptr;
 use libc::c_void;
 
 use winapi::shared::minwindef::HMODULE;
+use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::heapapi::{HeapAlloc, HeapCreate, HeapFree};
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::memoryapi::{VirtualProtect, VirtualQuery};
@@ -106,11 +106,11 @@ impl MemoryProtection {
                     );
                     if ok == 0 {
                         panic!(
-                            "Couldn't VirtualProtect memory {:p}:{:x} from {:x}: {}",
+                            "Couldn't VirtualProtect memory {:p}:{:x} from {:x}: {:08x}",
                             mem_info.BaseAddress,
                             mem_info.RegionSize,
                             mem_info.Protect,
-                            io::Error::last_os_error(),
+                            GetLastError(),
                         );
                     }
                     let address = mem_info.BaseAddress as *mut c_void;

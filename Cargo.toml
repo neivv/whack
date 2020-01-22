@@ -12,7 +12,7 @@ smallvec = "1.0"
 [dependencies.winapi]
 version = "0.3.4"
 features = [
-    "heapapi", "libloaderapi", "memoryapi"
+    "heapapi", "libloaderapi", "memoryapi", "errhandlingapi",
 ]
 
 [dev-dependencies]
