@@ -37,7 +37,12 @@ pub fn lib_handle_equals_name(handle: LibraryHandle, name: &LibraryName) -> bool
 }
 
 fn winapi_str<T: AsRef<OsStr>>(input: T) -> Vec<u16> {
-    input.as_ref().encode_wide().chain(Some(0)).collect::<Vec<u16>>()
+    let input = input.as_ref();
+    let iter = input.encode_wide();
+    let mut out = Vec::with_capacity(iter.size_hint().0 + 1);
+    out.extend(iter);
+    out.push(0);
+    out
 }
 
 pub struct ExecutableHeap {
