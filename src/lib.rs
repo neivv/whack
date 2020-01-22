@@ -42,7 +42,6 @@ use std::{mem, ops, ptr};
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::marker::{PhantomData, Sync};
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
@@ -978,11 +977,6 @@ impl<'b> ModulePatcher<'b> {
 pub enum Export<'a> {
     Name(&'a [u8]),
     Ordinal(u16),
-}
-
-/// Redirects stderr to a file.
-pub unsafe fn redirect_stderr<F: AsRef<Path>>(filename: F) -> bool {
-    platform::redirect_stderr(filename.as_ref())
 }
 
 /// Created with `whack_vars!` macrow.

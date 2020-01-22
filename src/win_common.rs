@@ -5,18 +5,14 @@ use std::ffi::OsStr;
 use std::io;
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
 use std::ptr;
 
 use libc::c_void;
 
-use winapi;
 use winapi::shared::minwindef::HMODULE;
-use winapi::um::fileapi::{self, CreateFileW};
 use winapi::um::heapapi::{HeapAlloc, HeapCreate, HeapFree};
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::memoryapi::{VirtualProtect, VirtualQuery};
-use winapi::um::winbase;
 use winapi::um::winnt::{self, HANDLE};
 
 use Export;
@@ -139,23 +135,6 @@ impl Drop for MemoryProtection {
                 VirtualProtect(tp.0 as *mut _, tp.1, tp.2, &mut tmp);
             }
         }
-    }
-}
-
-pub unsafe fn redirect_stderr(filename: &Path) -> bool {
-    let handle = CreateFileW(
-        winapi_str(filename).as_ptr(),
-        winnt::GENERIC_WRITE,
-        winnt::FILE_SHARE_READ,
-        ptr::null_mut(),
-        fileapi::CREATE_ALWAYS,
-        winnt::FILE_ATTRIBUTE_NORMAL,
-        ptr::null_mut(),
-    );
-    if !handle.is_null() {
-        winapi::um::processenv::SetStdHandle(winbase::STD_ERROR_HANDLE, handle) != 0
-    } else {
-        false
     }
 }
 

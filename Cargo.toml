@@ -12,7 +12,7 @@ smallvec = "1.0"
 [dependencies.winapi]
 version = "0.3.4"
 features = [
-    "fileapi", "heapapi", "libloaderapi", "memoryapi", "processenv", "winbase"
+    "heapapi", "libloaderapi", "memoryapi"
 ]
 
 [dev-dependencies]
@@ -21,6 +21,5 @@ byteorder = "1.2"
 [dev-dependencies.winapi]
 version = "0.3.4"
 features = [
-    "fileapi", "handleapi", "heapapi", "libloaderapi", "memoryapi", "processenv",
-    "sysinfoapi", "winbase"
+    "fileapi", "handleapi", "heapapi", "libloaderapi", "memoryapi", "sysinfoapi", "winbase"
 ]
