@@ -46,13 +46,13 @@ pub trait ExportHookClosure<Callback>: ExportHook {
 pub trait ExportHook {
     type Fnptr;
     type OptFnptr;
-    fn import(
+    unsafe fn import(
         self,
         patch: &mut ::ModulePatcher,
         dll: Cow<'static, [u8]>,
         val: Self::Fnptr,
     ) -> Patch;
-    fn import_opt(
+    unsafe fn import_opt(
         self,
         patch: &mut ::ModulePatcher,
         dll: Cow<'static, [u8]>,
@@ -79,7 +79,7 @@ pub trait ExportHook {
 /// # fn main() {}
 /// whack_export!(pub extern "system" IsDebuggerPresent() -> u32);
 ///
-/// fn hide_debugger() {
+/// unsafe fn hide_debugger() {
 ///     let mut patcher = whack::Patcher::new();
 ///     {
 ///         // Calling IsDebuggerPresent from a library or with GetProcAddress will
@@ -262,7 +262,7 @@ macro_rules! whack_export_hook_common {
     ($ret:ty, [$($aty:ty),*], [$($an:ident),*]) => {
         type Fnptr = unsafe fn($($aty),*) -> $ret;
         type OptFnptr = unsafe fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret;
-        fn import(
+        unsafe fn import(
             self,
             patch: &mut $crate::ModulePatcher,
             lib: ::std::borrow::Cow<'static, [u8]>,
@@ -272,12 +272,12 @@ macro_rules! whack_export_hook_common {
                 lib,
                 self,
                 move |$($an,)* _: unsafe extern fn($($aty),*) -> $ret| {
-                    unsafe { val($($an),*) }
+                    val($($an),*)
                 }
             )
         }
 
-        fn import_opt(
+        unsafe fn import_opt(
             self,
             patch: &mut $crate::ModulePatcher,
             lib: ::std::borrow::Cow<'static, [u8]>,
@@ -287,7 +287,7 @@ macro_rules! whack_export_hook_common {
                 lib,
                 self,
                 move |$($an,)* orig: unsafe extern fn($($aty),*) -> $ret| {
-                    unsafe { val($($an,)* orig) }
+                    val($($an,)* orig)
                 },
             )
         }

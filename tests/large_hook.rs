@@ -74,7 +74,7 @@ fn large_hook() {
         assert_nonhooked();
 
         let mut patcher = Patcher::new();
-        {
+        let patch = {
             let mut patch = patcher.patch_library(dll_name(), 0);
             patch.hook_closure(hook::Thirteen,
                 move |a: u32, b: u32, c: u32, d: u32, e: u32,
@@ -82,14 +82,14 @@ fn large_hook() {
                       k: u32, l: u32, m: u32,
                       orig,| {
                 orig(a + b, b, c + d, d, e + f, f, g + h, h, i + j, j, k + l, l, m)
-            });
-        }
+            })
+        };
 
         assert_hooked();
 
-        patcher.unpatch();
+        patcher.disable_patch(&patch);
         assert_nonhooked();
-        patcher.repatch();
+        patcher.enable_patch(&patch);
         assert_hooked();
     }
 }

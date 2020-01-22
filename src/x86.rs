@@ -192,13 +192,7 @@ impl HookWrapAssembler {
     /// Returns the buffer and possible offset for fixup original ptr for import hooks.
     pub fn generate_wrapper_code(&self, orig: OrigFuncCallback) -> HookWrapCode {
         let mut buffer = AssemblerBuf::new();
-        let tls_id = match orig {
-            OrigFuncCallback::Inline(..) => new_inline_tls_id() as u32,
-            _ => !0,
-        };
-        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, tls_id, orig);
-        let mut exit_wrapper_offset = 0;
-        let mut parent_hook_offset = 0;
+        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, !0, orig);
         // Only write out wrappers when needed
         let delayed_out = match orig {
             OrigFuncCallback::Overwritten(orig) => {
@@ -207,21 +201,47 @@ impl HookWrapAssembler {
             OrigFuncCallback::ImportHook => {
                 self.write_out_wrapper(&mut buffer, out_wrapper_pos, None)
             }
-            OrigFuncCallback::Inline(entry, exit, parent) => {
-                self.write_inline_out_wrapper(&mut buffer, out_wrapper_pos, entry);
-                exit_wrapper_offset = buffer.len();
-                self.write_inline_exit_hook(&mut buffer, tls_id, exit);
-                if !parent.is_null() {
-                    parent_hook_offset = buffer.len();
-                    self.write_inline_parent_hook(&mut buffer, tls_id, parent);
-                }
+            OrigFuncCallback::None |
+                OrigFuncCallback::Hook(_) |
+                OrigFuncCallback::Inline(..) =>
+            {
                 !0
             }
-            OrigFuncCallback::None | OrigFuncCallback::Hook(_) => !0,
         };
         HookWrapCode {
             buf: buffer,
             import_fixup_offset: delayed_out,
+            exit_wrapper_offset: 0,
+            parent_hook_offset: 0,
+        }
+    }
+
+    /// Returns the buffer and possible offset for fixup original ptr for import hooks.
+    ///
+    /// For inline hooks. Separate so that it won't get complied in if inline hooks
+    /// aren't used.
+    pub fn generate_wrapper_code_inline(
+        &self,
+        entry: *const u8,
+        exit: *const u8,
+        parent: *const u8,
+    ) -> HookWrapCode {
+        let mut buffer = AssemblerBuf::new();
+        let tls_id = new_inline_tls_id() as u32;
+        let orig = OrigFuncCallback::Inline(entry, exit, parent);
+        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, tls_id, orig);
+        let mut parent_hook_offset = 0;
+
+        self.write_inline_out_wrapper(&mut buffer, out_wrapper_pos, entry);
+        let exit_wrapper_offset = buffer.len();
+        self.write_inline_exit_hook(&mut buffer, tls_id, exit);
+        if !parent.is_null() {
+            parent_hook_offset = buffer.len();
+            self.write_inline_parent_hook(&mut buffer, tls_id, parent);
+        }
+        HookWrapCode {
+            buf: buffer,
+            import_fixup_offset: !0,
             exit_wrapper_offset,
             parent_hook_offset,
         }

@@ -160,9 +160,11 @@ impl HookWrapAssembler {
             OrigFuncCallback::ImportHook => {
                 self.write_out_wrapper(&mut buffer, out_wrapper_pos, None)
             }
-            OrigFuncCallback::None | OrigFuncCallback::Hook(_) => None,
-            OrigFuncCallback::Inline(..) => {
-                unimplemented!();
+            OrigFuncCallback::None |
+                OrigFuncCallback::Hook(_) |
+                OrigFuncCallback::Inline(..) =>
+            {
+                None
             }
         };
         buffer.align(16);
@@ -174,6 +176,15 @@ impl HookWrapAssembler {
                 .unwrap_or(0),
             exit_wrapper_offset: 0,
         }
+    }
+
+    pub fn generate_wrapper_code_inline(
+        &self,
+        _entry: *const u8,
+        _exit: *const u8,
+        _parent: *const u8,
+    ) -> HookWrapCode {
+        unimplemented!()
     }
 
     fn write_in_wrapper(&self, buffer: &mut AssemblerBuf, orig: OrigFuncCallback) -> AsmFixupPos {

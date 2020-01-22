@@ -70,7 +70,7 @@ mod x86 {
                         *out.offset(1) += 2;
                     },
                 );
-                active_patcher.apply()
+                active_patcher.save_patch_group()
             };
             let val = func(1, 2, result.as_mut_ptr());
             assert_eq!(result[0], ((6 ^ 0x50) * 2) + 555);

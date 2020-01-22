@@ -14,7 +14,6 @@ use whack::Patcher;
 use winapi::shared::minwindef::BOOL;
 use winapi::um::fileapi;
 use winapi::um::handleapi::{self, INVALID_HANDLE_VALUE};
-use winapi::um::sysinfoapi;
 use winapi::um::winbase;
 use winapi::um::winnt::{self, HANDLE};
 
@@ -25,7 +24,6 @@ whack_export!(pub extern "system" GetTickCount() -> u32);
 
 thread_local!(static CLOSE_HANDLE_COUNT: Cell<u32> = Cell::new(0));
 thread_local!(static GET_PROFILE_INT_COUNT: Cell<u32> = Cell::new(0));
-thread_local!(static TICK_COUNT_CALLS: Cell<u32> = Cell::new(0));
 
 unsafe fn close_handle_log(handle: HANDLE, orig: unsafe extern fn(HANDLE) -> BOOL) -> BOOL {
     CLOSE_HANDLE_COUNT.with(|x| x.set(x.get() + 1));
@@ -35,15 +33,6 @@ unsafe fn close_handle_log(handle: HANDLE, orig: unsafe extern fn(HANDLE) -> BOO
 unsafe fn hook_without_orig(_a: *const u16, _b: *const u16, _c: u32) -> u32 {
     GET_PROFILE_INT_COUNT.with(|x| x.set(x.get() + 1));
     0
-}
-
-
-fn add_tick_count_call() {
-    TICK_COUNT_CALLS.with(|x| x.set(x.get() + 1));
-}
-
-fn get_tick_count_calls() -> u32 {
-    TICK_COUNT_CALLS.with(|x| x.get())
 }
 
 #[test]
@@ -58,20 +47,7 @@ fn import_hooking() {
     let value = Rc::new(AtomicUsize::new(0));
     let mut root_patcher = Patcher::new();
     let create_file_patch;
-    let tick_count_patch;
-    {
-        {
-            let mut exe = root_patcher.patch_exe(!0);
-            tick_count_patch = exe.import_hook_closure(
-                &b"kernel32"[..],
-                GetTickCount,
-                move |orig| {
-                    add_tick_count_call();
-                    unsafe { orig() }
-                },
-            );
-            exe.apply_disabled();
-        }
+    unsafe {
         let mut patcher = root_patcher.patch_exe(!0);
         let copy = value.clone();
         create_file_patch = patcher.import_hook_closure(&b"kernel32"[..], CreateFileW,
@@ -79,11 +55,9 @@ fn import_hooking() {
             let prev = copy.fetch_add(1, Ordering::SeqCst);
             let mut modified = vec![0; 1024];
             let mut pos = 0;
-            unsafe {
-                while *filename.offset(pos as isize) != 0 {
-                    modified[pos] = *filename.offset(pos as isize);
-                    pos += 1;
-                }
+            while *filename.offset(pos as isize) != 0 {
+                modified[pos] = *filename.offset(pos as isize);
+                pos += 1;
             }
             modified[pos] = 0;
             if prev == 0 {
@@ -91,11 +65,10 @@ fn import_hooking() {
                 modified[pos - 2] = b'b' as u16;
                 modified[pos - 3] = b'a' as u16;
             }
-            unsafe { orig(modified.as_ptr(), a, b, c, d, e, f) }
+            orig(modified.as_ptr(), a, b, c, d, e, f)
         });
         patcher.import_hook_opt(&b"kernel32"[..], CloseHandle, close_handle_log);
         patcher.import_hook(&b"kernel32"[..], GetProfileIntW, hook_without_orig);
-        patcher.apply();
     }
     unsafe {
         assert_eq!(value.load(Ordering::SeqCst), 0);
@@ -135,14 +108,6 @@ fn import_hooking() {
         handleapi::CloseHandle(result);
         std::fs::remove_file("file.abc").unwrap();
     }
-    unsafe { sysinfoapi::GetTickCount(); }
-    assert_eq!(get_tick_count_calls(), 0);
-    {
-        unsafe { root_patcher.enable_patch(&tick_count_patch); }
-    }
-    let prev = get_tick_count_calls();
-    unsafe { sysinfoapi::GetTickCount(); }
-    assert_eq!(get_tick_count_calls(), prev + 1);
 }
 
 unsafe fn create_file(path: &str) -> HANDLE {

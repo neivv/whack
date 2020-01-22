@@ -64,12 +64,14 @@ struct ImportHook {
     // This keeps the hook target alive as long as the hook exists.
     #[allow(dead_code)]
     wrapper_target: Box<[u8]>,
+    stored_wrapper: *const u8,
+    orig: *const u8,
 }
 
 enum ModulePatchType {
     Hook(Box<HookPatch>),
     Data(ReplacingPatch),
-    Import(Box<ImportHook>, *const u8, *const u8),
+    Import(Box<ImportHook>),
 }
 
 unsafe impl Send for ModulePatchType {
@@ -120,15 +122,6 @@ enum ImageBase {
 
 unsafe impl Send for ImageBase {}
 unsafe impl Sync for ImageBase {}
-
-impl ImageBase {
-    fn is_memory_address(&self) -> bool {
-        match *self {
-            ImageBase::Memory { .. } => true,
-            _ => false,
-        }
-    }
-}
 
 fn image_base_to_handles_opt(val: &ImageBase) -> Option<PatchEnableHandles> {
     match *val {
@@ -234,73 +227,17 @@ impl ModulePatch {
         }
         match self.variant {
             ModulePatchType::Hook(ref mut hook) => {
-                let base = handles.exec as usize;
-                let to_abs = |relative: usize| (base + relative) as *const u8;
-                let (entry, exit, inline_parent_entry) = match hook.ty {
-                    HookType::Entry(a) | HookType::InlineNoOrig(a) => (a, !0, 0),
-                    HookType::Inline(entry, exit, parent) => (entry, exit, parent),
-                };
-                if hook.entry.is_none() {
-                    let orig = match hook.ty {
-                        HookType::Entry(a) => OrigFuncCallback::Overwritten(to_abs(a)),
-                        HookType::InlineNoOrig(a) => OrigFuncCallback::Hook(to_abs(a)),
-                        HookType::Inline(a, e, p) => {
-                            OrigFuncCallback::Inline(to_abs(a), to_abs(e), to_abs(p))
-                        }
-                    };
-                    let code = hook.wrapper_code.generate_wrapper_code(orig);
-                    let (entry, exit, parent) = code.write_wrapper(
-                        Some(to_abs(entry)),
-                        match exit != !0 {
-                            true => Some(to_abs(exit)),
-                            false => None,
-                        },
-                        match inline_parent_entry != 0 {
-                            true => Some(to_abs(inline_parent_entry)),
-                            false => None,
-                        },
-                        heap,
-                        None,
-                    );
-                    hook.entry = Some(entry);
-                    if let Some(exit) = exit {
-                        hook.exit = Some(exit);
-                    }
-                    if let Some(parent) = parent {
-                        hook.inline_parent_entry = Some(parent);
-                    }
-                }
-                if let Some(ref hook) = hook.entry {
-                    let write_address = (handles.write as usize + entry) as *mut u8;
-                    platform::write_jump_to_ptr(write_address, hook.pointer_to_wrapper);
-                }
-                if let Some(ref hook) = hook.exit {
-                    let write_address = (handles.write as usize + exit) as *mut u8;
-                    platform::write_jump_to_ptr(write_address, hook.pointer_to_wrapper);
-                }
-                if let Some(ref hook) = hook.inline_parent_entry {
-                    let write_address = (handles.write as usize + inline_parent_entry) as *mut u8;
-                    platform::write_jump_to_ptr(write_address, hook.pointer_to_wrapper);
+                if let HookType::Inline(..) = hook.ty {
+                    hook.apply_inline(handles, heap)
+                } else {
+                    hook.apply_no_inline(handles, heap)
                 }
             }
             ModulePatchType::Data(ref mut patch) => {
-                let address = (handles.write as usize + patch.address) as *const u8;
-                let len = patch.data.len();
-                ptr::copy_nonoverlapping(address, patch.backup_buf.as_mut_ptr(), len);
-                ptr::copy_nonoverlapping(patch.data.as_ptr(), address as *mut u8, len);
+                patch.apply(handles);
             }
-            ModulePatchType::Import(ref hook, ref mut stored_wrapper, ref mut orig) => {
-                let addr = platform::import_addr(handles.write, &hook.library, &hook.export);
-                if let Some(addr) = addr {
-                    if stored_wrapper.is_null() {
-                        let out_ptr = Some(*addr as *const u8);
-                        let (entry, _, _) =
-                            hook.wrapper_code.write_wrapper(None, None, None, heap, out_ptr);
-                        *stored_wrapper = entry.wrapper;
-                    }
-                    *orig = *addr as *const u8;
-                    *addr = *stored_wrapper as usize;
-                }
+            ModulePatchType::Import(ref mut hook) => {
+                hook.apply(handles, heap);
             }
         }
         self.active = true;
@@ -329,15 +266,123 @@ impl ModulePatch {
                         let address = (handle as usize + address) as *mut u8;
                         ptr::copy_nonoverlapping(backup_buf.as_ptr(), address, backup_buf.len());
                     }
-                    ModulePatchType::Import(ref hook, _wrapper, ref orig) => {
+                    ModulePatchType::Import(ref mut hook) => {
                         let addr = platform::import_addr(handle, &hook.library, &hook.export);
                         if let Some(addr) = addr {
-                            *addr = *orig as usize;
+                            *addr = hook.orig as usize;
                         }
                     }
                 }
             }
             self.active = false;
+        }
+    }
+}
+
+impl HookPatch {
+    /// Applies an non-inline hook.
+    pub unsafe fn apply_no_inline(
+        &mut self,
+        handles: &PatchEnableHandles,
+        heap: &mut platform::ExecutableHeap,
+    ) {
+        let base = handles.exec as usize;
+        let to_abs = |relative: usize| (base + relative) as *const u8;
+        let entry = match self.ty {
+            HookType::Entry(a) | HookType::InlineNoOrig(a) => a,
+            HookType::Inline(..) => return,
+        };
+        if self.entry.is_none() {
+            let orig = match self.ty {
+                HookType::Entry(a) => OrigFuncCallback::Overwritten(to_abs(a)),
+                HookType::InlineNoOrig(a) => OrigFuncCallback::Hook(to_abs(a)),
+                HookType::Inline(..) => return,
+            };
+            let code = self.wrapper_code.generate_wrapper_code(orig);
+            let (entry, _, _) = code.write_wrapper(
+                Some(to_abs(entry)),
+                None,
+                None,
+                heap,
+                None,
+            );
+            self.entry = Some(entry);
+        }
+        if let Some(ref hook) = self.entry {
+            let write_address = (handles.write as usize + entry) as *mut u8;
+            platform::write_jump_to_ptr(write_address, hook.pointer_to_wrapper);
+        }
+    }
+
+    /// Applies an inline hook.
+    pub unsafe fn apply_inline(
+        &mut self,
+        handles: &PatchEnableHandles,
+        heap: &mut platform::ExecutableHeap,
+    ) {
+        let base = handles.exec as usize;
+        let to_abs = |relative: usize| (base + relative) as *const u8;
+        let (entry, exit, inline_parent_entry) = match self.ty {
+            HookType::Inline(entry, exit, parent) => (entry, exit, parent),
+            _ => return,
+        };
+        if self.entry.is_none() {
+            let (a, b, c) = match self.ty {
+                HookType::Inline(a, e, p) => (to_abs(a), to_abs(e), to_abs(p)),
+                _ => return,
+            };
+            let code = self.wrapper_code.generate_wrapper_code_inline(a, b, c);
+            let (entry, exit, parent) = code.write_wrapper(
+                Some(to_abs(entry)),
+                Some(to_abs(exit)),
+                Some(to_abs(inline_parent_entry)),
+                heap,
+                None,
+            );
+            self.entry = Some(entry);
+            self.exit = exit;
+            self.inline_parent_entry = parent;
+        }
+        if let Some(ref hook) = self.entry {
+            let write_address = (handles.write as usize + entry) as *mut u8;
+            platform::write_jump_to_ptr(write_address, hook.pointer_to_wrapper);
+        }
+        if let Some(ref hook) = self.exit {
+            let write_address = (handles.write as usize + exit) as *mut u8;
+            platform::write_jump_to_ptr(write_address, hook.pointer_to_wrapper);
+        }
+        if let Some(ref hook) = self.inline_parent_entry {
+            let write_address = (handles.write as usize + inline_parent_entry) as *mut u8;
+            platform::write_jump_to_ptr(write_address, hook.pointer_to_wrapper);
+        }
+    }
+}
+
+impl ReplacingPatch {
+    pub unsafe fn apply(&mut self, handles: &PatchEnableHandles) {
+        let address = (handles.write as usize + self.address) as *const u8;
+        let len = self.data.len();
+        ptr::copy_nonoverlapping(address, self.backup_buf.as_mut_ptr(), len);
+        ptr::copy_nonoverlapping(self.data.as_ptr(), address as *mut u8, len);
+    }
+}
+
+impl ImportHook {
+    pub unsafe fn apply(
+        &mut self,
+        handles: &PatchEnableHandles,
+        heap: &mut platform::ExecutableHeap,
+    ) {
+        let addr = platform::import_addr(handles.write, &self.library, &self.export);
+        if let Some(addr) = addr {
+            if self.stored_wrapper.is_null() {
+                let out_ptr = Some(*addr as *const u8);
+                let (entry, _, _) =
+                    self.wrapper_code.write_wrapper(None, None, None, heap, out_ptr);
+                self.stored_wrapper = entry.wrapper;
+            }
+            self.orig = *addr as *const u8;
+            *addr = self.stored_wrapper as usize;
         }
     }
 }
@@ -359,6 +404,9 @@ pub struct Patcher {
 struct PatchGroup {
     image_base: ImageBase,
     patches: Vec<patch_map::Key>,
+    /// These are stored here so that reapplying patches after a dll is
+    /// loaded won't require anything more than `Patcher::enable_patch`.
+    /// Could possibly require user to re-call init funcs though.
     init_funcs: Vec<InitFn>,
 }
 
@@ -373,10 +421,14 @@ struct PatchGroup {
 #[must_use]
 pub struct ModulePatcher<'b> {
     parent: &'b mut Patcher,
-    patches: Vec<(ModulePatch, patch_map::Key)>,
+    patches: Vec<patch_map::Key>,
     image_base: ImageBase,
     init_fns: Vec<InitFn>,
     expected_base: usize,
+    patch_enable_handles: Option<PatchEnableHandles>,
+    /// RAII guard, if the module is loaded (and not memory)
+    #[allow(dead_code)]
+    protection: Option<platform::MemoryProtection>,
 }
 
 impl Patcher {
@@ -395,12 +447,18 @@ impl Patcher {
     /// Applying constant/nop patches requires specifying `expected_base`, otherwise it can
     /// be 0.
     pub fn patch_exe<'b>(&'b mut self, expected_base: usize) -> ModulePatcher<'b> {
+        let image_base = ImageBase::Executable;
+        let patch_enable_handles = image_base_to_handles_opt(&image_base);
+        let protection = patch_enable_handles.as_ref()
+            .map(|handles| platform::MemoryProtection::new(handles.write));
         ModulePatcher {
             parent: self,
             patches: Vec::new(),
             init_fns: Vec::new(),
-            image_base: ImageBase::Executable,
+            image_base,
             expected_base,
+            patch_enable_handles,
+            protection,
         }
     }
 
@@ -416,12 +474,18 @@ impl Patcher {
     ) -> ModulePatcher<'b>
     where T: AsRef<OsStr>
     {
+        let image_base = ImageBase::Library(Arc::new(platform::library_name(library)));
+        let patch_enable_handles = image_base_to_handles_opt(&image_base);
+        let protection = patch_enable_handles.as_ref()
+            .map(|handles| platform::MemoryProtection::new(handles.write));
         ModulePatcher {
             parent: self,
             patches: Vec::new(),
             init_fns: Vec::new(),
-            image_base: ImageBase::Library(Arc::new(platform::library_name(library))),
+            image_base,
             expected_base,
+            patch_enable_handles,
+            protection,
         }
     }
 
@@ -442,12 +506,16 @@ impl Patcher {
         execute: *mut c_void,
         expected_base: usize
     ) -> ModulePatcher<'b> {
+        let image_base = ImageBase::Memory { write, exec: execute };
+        let patch_enable_handles = image_base_to_handles_opt(&image_base);
         ModulePatcher {
             parent: self,
             patches: Vec::new(),
             init_fns: Vec::new(),
-            image_base: ImageBase::Memory { write, exec: execute },
+            image_base,
             expected_base,
+            patch_enable_handles,
+            protection: None,
         }
     }
 
@@ -616,61 +684,6 @@ impl Patcher {
             }
         }
     }
-
-    fn unprotect_all_patch_memory(&self)
-        -> SmallVec<[(platform::LibraryHandle, platform::MemoryProtection); 16]>
-    {
-        let mut protections =
-            SmallVec::<[(platform::LibraryHandle, platform::MemoryProtection); 16]>::new();
-        for group in self.patch_groups.iter() {
-            if !group.image_base.is_memory_address() {
-                if let Some(handles) = image_base_to_handles_opt(&group.image_base) {
-                    if !protections.iter().any(|&(x, _)| x == handles.write) {
-                        let protection = platform::MemoryProtection::new(handles.write);
-                        protections.push((handles.write, protection));
-                    }
-                }
-            }
-        }
-        protections
-    }
-
-    /// Disables all patches.
-    pub unsafe fn unpatch(&mut self) {
-        let _protections = self.unprotect_all_patch_memory();
-        for group in self.patch_groups.iter_mut() {
-            if let Some(handles) = image_base_to_handles_opt(&group.image_base) {
-                for key in &group.patches {
-                    if let Some(patch) = self.patches.get_mut(key) {
-                        patch.disable(Some(handles.write));
-                    }
-                }
-            } else {
-                for key in &group.patches {
-                    if let Some(patch) = self.patches.get_mut(key) {
-                        patch.disable(None);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Enables every patch that has been associated with this `Patcher`.
-    pub unsafe fn repatch(&mut self) {
-        let _protections = self.unprotect_all_patch_memory();
-        for group in self.patch_groups.iter_mut() {
-            if let Some(ref handles) = image_base_to_handles_opt(&group.image_base) {
-                for func in &group.init_funcs {
-                    func(handles.exec as usize, &mut self.exec_heap);
-                }
-                for key in &group.patches {
-                    if let Some(patch) = self.patches.get_mut(key) {
-                        patch.enable(handles, &mut self.exec_heap);
-                    }
-                }
-            }
-        }
-    }
 }
 
 impl<'b> ModulePatcher<'b> {
@@ -706,41 +719,80 @@ impl<'b> ModulePatcher<'b> {
         self.add_hook::<H, T>(target, HookType::InlineNoOrig(H::address()))
     }
 
-    fn add_hook<H, T>(&mut self, target: T, ty: HookType) -> Patch
+    unsafe fn add_hook<H, T>(&mut self, target: T, ty: HookType) -> Patch
     where H: AddressHookClosure<T> {
         let target = H::write_target_objects(target);
         let assembler = H::wrapper_assembler(target.as_ptr());
-        self.add_hook_nongeneric(target, assembler, ty)
+        match ty {
+            HookType::Entry(..) | HookType::InlineNoOrig(..) => {
+                self.add_noninline_hook(ty, target, assembler)
+            }
+            HookType::Inline(entry, exit, parent) => {
+                self.add_inline_hook(entry, exit, parent, target, assembler)
+            }
+        }
     }
 
-    // Code size optimization
-    fn add_hook_nongeneric(
+    unsafe fn add_noninline_hook(
         &mut self,
+        ty: HookType,
         target: Box<[u8]>,
         wrapper_assembler: platform::HookWrapAssembler,
-        ty: HookType,
     ) -> Patch {
+        let mut variant = Box::new(HookPatch {
+            wrapper_code: wrapper_assembler,
+            wrapper_target: target,
+            entry: None,
+            exit: None,
+            inline_parent_entry: None,
+            ty,
+        });
+        if let Some(ref handles) = self.patch_enable_handles {
+            variant.apply_no_inline(handles, &mut self.parent.exec_heap);
+        }
         let patch = ModulePatch {
-            variant: ModulePatchType::Hook(Box::new(HookPatch {
-                wrapper_code: wrapper_assembler,
-                wrapper_target: target,
-                entry: None,
-                exit: None,
-                inline_parent_entry: None,
-                ty,
-            })),
+            variant: ModulePatchType::Hook(variant),
             image_base: self.image_base.clone(),
-            active: false,
+            active: self.patch_enable_handles.is_some(),
         };
-        let key = self.parent.patches.alloc_slot();
-        self.patches.push((patch, key.clone()));
+        let key = self.parent.patches.insert(patch);
+        self.patches.push(key.clone());
+        Patch(PatchEnum::Regular(key))
+    }
+
+    unsafe fn add_inline_hook(
+        &mut self,
+        entry: usize,
+        exit: usize,
+        parent: usize,
+        target: Box<[u8]>,
+        wrapper_assembler: platform::HookWrapAssembler,
+    ) -> Patch {
+        let mut variant = Box::new(HookPatch {
+            wrapper_code: wrapper_assembler,
+            wrapper_target: target,
+            entry: None,
+            exit: None,
+            inline_parent_entry: None,
+            ty: HookType::Inline(entry, exit, parent),
+        });
+        if let Some(ref handles) = self.patch_enable_handles {
+            variant.apply_inline(handles, &mut self.parent.exec_heap);
+        }
+        let patch = ModulePatch {
+            variant: ModulePatchType::Hook(variant),
+            image_base: self.image_base.clone(),
+            active: self.patch_enable_handles.is_some(),
+        };
+        let key = self.parent.patches.insert(patch);
+        self.patches.push(key.clone());
         Patch(PatchEnum::Regular(key))
     }
 
     /// Creates a hook from `hook` to `target`.
     ///
-    /// The original function will not be called afterwards. To apply a non-modifying hook, use
-    /// `hook_closure()`, `call_hook()` or `hook_opt()`.
+    /// The original function will not be called afterwards. To apply a non-modifying hook,
+    /// use `hook_closure()`, `call_hook()` or `hook_opt()`.
     pub unsafe fn hook<H>(&mut self, _hook: H, target: H::Fnptr) -> Patch
     where H: AddressHook,
     {
@@ -767,77 +819,28 @@ impl<'b> ModulePatcher<'b> {
         _hook.call_hook(self, target)
     }
 
-    /// Applies and enables the patches which have been created using this `ModulePatcher`.
-    ///
-    /// Returns a `Patch` which can be used to control all applied patches at once.
-    pub fn apply(mut self) -> Patch {
-        // Have to do this as actually consuming is not allowed due to Drop impl
-        let patches = mem::replace(&mut self.patches, vec![]);
-        let init_fns = mem::replace(&mut self.init_fns, vec![]);
-        let image_base = mem::replace(&mut self.image_base, ImageBase::Executable);
-        ModulePatcher::apply_patches(self.parent, patches, init_fns, image_base, true)
-    }
-
-    /// Applies the patches which have been created using this `ModulePatcher`, without
-    /// enabling them.
-    ///
-    /// Returns a `Patch` which can be used to control all applied patches at once.
-    pub fn apply_disabled(mut self) -> Patch {
-        let patches = mem::replace(&mut self.patches, vec![]);
-        let init_fns = mem::replace(&mut self.init_fns, vec![]);
-        let image_base = mem::replace(&mut self.image_base, ImageBase::Executable);
-        ModulePatcher::apply_patches(self.parent, patches, init_fns, image_base, false)
-    }
-
-    fn apply_patches(
-        parent: &mut Patcher,
-        mut patches: Vec<(ModulePatch, patch_map::Key)>,
-        init_fns: Vec<InitFn>,
-        image_base: ImageBase,
-        enable: bool,
-    ) -> Patch {
-        let handles = image_base_to_handles_opt(&image_base);
-        if let Some(ref handles) = handles {
-            for func in &init_fns {
-                unsafe { func(handles.exec as usize, &mut parent.exec_heap); }
-            }
-        }
-
-        if enable {
-            if let Some(ref handles) = handles {
-                let _protection;
-                if !image_base.is_memory_address() {
-                    _protection = platform::MemoryProtection::new(handles.write);
-                }
-                for &mut (ref mut patch, _) in &mut patches {
-                    unsafe { patch.enable(handles, &mut parent.exec_heap); }
-                }
-            }
-        }
-        let keys = patches.iter()
-            .map(|&(_, ref key)| key.clone())
-            .collect();
-
-        for (patch, key) in patches {
-            parent.patches.assign(key, patch);
-        }
-
-        let group_key = parent.patch_groups.insert(PatchGroup {
-            image_base,
-            patches: keys,
-            init_funcs: init_fns,
+    /// Saves the patches that were applied using this `ModulePatcher`
+    /// into a group that can be enabled and disabled all at once.
+    pub fn save_patch_group(self) -> Patch {
+        let group_key = self.parent.patch_groups.insert(PatchGroup {
+            image_base: self.image_base,
+            patches: self.patches,
+            init_funcs: self.init_fns,
         });
         Patch(PatchEnum::Group(group_key))
     }
 
     /// Calls this function whenever the process loads module that is being currently patched.
-    /// If the module is currently loaded, the function gets called during `apply()` and
-    /// equivalent functions.
+    /// If the module is currently loaded, the function gets also called.
     ///
     /// Mainly meant for `whack_vars!` and `whack_funcs!` macros, as the addition cannot be
     /// reverted.
     #[doc(hidden)]
     pub unsafe fn add_init_fn(&mut self, func: InitFn) {
+        if let Some(ref handles) = self.patch_enable_handles {
+            func(handles.exec as usize, &mut self.parent.exec_heap);
+        }
+
         self.init_fns.push(func);
     }
 
@@ -866,17 +869,21 @@ impl<'b> ModulePatcher<'b> {
     ///
     /// `address` uses the expected base which was specified when creating this `ModulePatcher`.
     pub unsafe fn replace(&mut self, address: usize, mem: &[u8]) -> Patch {
-        let patch = ModulePatch {
-            variant: ModulePatchType::Data(ReplacingPatch {
-                data: mem.iter().cloned().collect(),
-                backup_buf: std::iter::repeat(0).take(mem.len()).collect(),
-                address: address - self.expected_base,
-            }),
-            image_base: self.image_base.clone(),
-            active: false,
+        let mut variant = ReplacingPatch {
+            data: mem.iter().cloned().collect(),
+            backup_buf: std::iter::repeat(0).take(mem.len()).collect(),
+            address: address - self.expected_base,
         };
-        let key = self.parent.patches.alloc_slot();
-        self.patches.push((patch, key.clone()));
+        if let Some(ref handles) = self.patch_enable_handles {
+            variant.apply(handles);
+        }
+        let patch = ModulePatch {
+            variant: ModulePatchType::Data(variant),
+            image_base: self.image_base.clone(),
+            active: self.patch_enable_handles.is_some(),
+        };
+        let key = self.parent.patches.insert(patch);
+        self.patches.push(key.clone());
         Patch(PatchEnum::Regular(key))
     }
 
@@ -885,7 +892,7 @@ impl<'b> ModulePatcher<'b> {
     ///
     /// This function doesn't require `library` to be loaded. As such, if the library doesn't
     /// actually export `hook`, any errors will not be reported.
-    pub fn import_hook_closure<H, T, L>(
+    pub unsafe fn import_hook_closure<H, T, L>(
         &mut self,
         library: L,
         _hook: H,
@@ -895,25 +902,31 @@ impl<'b> ModulePatcher<'b> {
           L: Into<Cow<'static, [u8]>>,
     {
         let wrapper_target = H::write_target_objects(target);
+        let mut variant = Box::new(ImportHook {
+            library: library.into(),
+            export: H::default_export(),
+            wrapper_code: H::wrapper_assembler(wrapper_target.as_ptr())
+                .generate_wrapper_code(OrigFuncCallback::ImportHook),
+            wrapper_target,
+            orig: ptr::null(),
+            stored_wrapper: ptr::null(),
+        });
+        if let Some(ref handles) = self.patch_enable_handles {
+            variant.apply(handles, &mut self.parent.exec_heap);
+        }
         let patch = ModulePatch {
-            variant: ModulePatchType::Import(Box::new(ImportHook {
-                library: library.into(),
-                export: H::default_export(),
-                wrapper_code: H::wrapper_assembler(wrapper_target.as_ptr())
-                    .generate_wrapper_code(OrigFuncCallback::ImportHook),
-                wrapper_target,
-            }), ptr::null(), ptr::null()),
+            variant: ModulePatchType::Import(variant),
             image_base: self.image_base.clone(),
-            active: false,
+            active: self.patch_enable_handles.is_some(),
         };
-        let key = self.parent.patches.alloc_slot();
-        self.patches.push((patch, key.clone()));
+        let key = self.parent.patches.insert(patch);
+        self.patches.push(key.clone());
         Patch(PatchEnum::Regular(key))
     }
 
     /// Same as `import_hook_closure`, but hooks to an `unsafe fn` which doesn't take
     /// reference to the original function.
-    pub fn import_hook<H, L>(
+    pub unsafe fn import_hook<H, L>(
         &mut self,
         library: L,
         hook: H,
@@ -928,7 +941,7 @@ impl<'b> ModulePatcher<'b> {
 
     /// Same as `import_hook_closure`, but hooks to an `unsafe fn` which can also call the
     /// original function.
-    pub fn import_hook_opt<H, L>(
+    pub unsafe fn import_hook_opt<H, L>(
         &mut self,
         library: L,
         hook: H,
@@ -961,20 +974,7 @@ impl<'b> ModulePatcher<'b> {
         for &arg in &decl.args {
             assembler.add_arg(arg);
         }
-        let ty = HookType::Inline(decl.entry, decl.exit, decl.inline_parent_entry);
-        self.add_hook_nongeneric(target, assembler, ty)
-    }
-}
-
-impl<'b> Drop for ModulePatcher<'b> {
-    /// Applies patches with `apply()` if they weren't explicitly applied.
-    fn drop(&mut self) {
-        if !self.patches.is_empty() || !self.init_fns.is_empty() {
-            let patches = mem::replace(&mut self.patches, vec![]);
-            let image_base = mem::replace(&mut self.image_base, ImageBase::Executable);
-            let init_fns = mem::replace(&mut self.init_fns, vec![]);
-            ModulePatcher::apply_patches(self.parent, patches, init_fns, image_base, true);
-        }
+        self.add_inline_hook(decl.entry, decl.exit, decl.inline_parent_entry, target, assembler)
     }
 }
 

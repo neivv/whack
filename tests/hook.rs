@@ -136,7 +136,7 @@ fn address_hooking() {
         assert_nonhooked();
 
         let mut patcher = Patcher::new();
-        {
+        let patch = {
             let mut patch = patcher.patch_library(dll_name(), 0);
             patch.hook_closure(hook::HookTest,
                 move |a: u32, b: u32, c: u32, d: u32, e: u32, orig| {
@@ -150,14 +150,15 @@ fn address_hooking() {
                 move |a: u32, b: u32, c: u32, d: u32, e: u32, orig| {
                 orig(e, d, c, b, a)
             });
-        }
+            patch.save_patch_group()
+        };
 
         assert_hooked();
 
         println!("Testing unpatching");
-        patcher.unpatch();
+        patcher.disable_patch(&patch);
         assert_nonhooked();
-        patcher.repatch();
+        patcher.enable_patch(&patch);
         assert_hooked();
     }
 }

@@ -72,7 +72,6 @@ fn func_calls() {
             let mut patcher = Patcher::new();
             let mut patcher = patcher.patch_library(dll_name(), 0);
             funcs::init_funcs(&mut patcher);
-            patcher.apply();
             call_funcs();
         }
     }
