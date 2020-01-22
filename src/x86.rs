@@ -5,10 +5,9 @@ use std::mem;
 use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::io::Write;
 
 use lde;
-use byteorder::{LE, LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{ByteOrder, LE};
 use smallvec::SmallVec;
 
 use helpers::*;
@@ -26,10 +25,9 @@ const JUMP_INS_LEN: usize = 6;
 pub unsafe fn write_jump_to_ptr(from: *mut u8, to_ptr: *const *const u8) {
     // jmp [to_ptr]
     // We want to use a position-independent jump so it works with aliasing view patching.
-    let mut out = slice::from_raw_parts_mut(from, JUMP_INS_LEN);
-    out.write_all(&[0xff, 0x25]).unwrap();
-    out.write_u32::<LittleEndian>(to_ptr as u32).unwrap();
-    assert_eq!(out.len(), 0);
+    *from = 0xff;
+    *from.add(1) = 0x25;
+    (from.add(2) as *mut u32).write_unaligned(to_ptr as u32);
 }
 
 #[repr(C)]
@@ -352,7 +350,7 @@ impl HookWrapAssembler {
         let pushad_offset = 0x4;
         buffer.mov(AsmValue::Register(6), AsmValue::EaxPtr(pushad_offset  + 0xc));
         buffer.mov(AsmValue::Register(7), AsmValue::Register(4));
-        buffer.buf.write_all(&[0xf3, 0xa4]).unwrap();
+        buffer.buf.extend_from_slice(&[0xf3, 0xa4]);
 
         let mut stack_args: SmallVec<[_; 8]> = self.args
             .iter()
@@ -376,9 +374,9 @@ impl HookWrapAssembler {
                 stack_off,
             );
             // Mov [esp + out_pos * 4], edx
-            buffer.buf.write_all(
+            buffer.buf.extend_from_slice(
                 &[0x89, 0x44 + second_scratch * 8, 0xe4, out_pos as u8 * 4 + 4]
-            ).unwrap();
+            );
         }
 
         for reg in (1u8..8).filter(|&x| x != 4 && x != stack_off) {
@@ -402,9 +400,9 @@ impl HookWrapAssembler {
         // Restore the stack_off register, can't use EaxPtr if it was overwritten already.
         // mov stack_off, [stack_off + offset]
         buffer.pop(AsmValue::Register(stack_off));
-        buffer.buf.write_all(
+        buffer.buf.extend_from_slice(
             &[0x8b, 0x40 + 9 * stack_off, pushad_offset as u8 + 0x1c - stack_off * 4]
-        ).unwrap();
+        );
         if !self.args.iter().any(|&x| x == Location::Register(0)) {
             buffer.mov(AsmValue::Register(0), AsmValue::EaxPtr(pushad_offset + 0x1c));
         }
@@ -430,7 +428,7 @@ impl HookWrapAssembler {
         buffer.call(AsmValue::Constant(cast_fnptr_usize(get_inline_tls as usize)));
         buffer.pop(AsmValue::Register(1));
         // Doing rest like this due to the jump
-        buffer.buf.write_all(&[
+        buffer.buf.extend_from_slice(&[
             0x85, 0xc0,
             0x74, 0x0c,
             0x8b, 0x08,
@@ -446,7 +444,7 @@ impl HookWrapAssembler {
             0x59,
             0x58,
             0x9d,
-        ]).unwrap();
+        ]);
         unsafe {
             let len = copy_instruction_length(exit, JUMP_INS_LEN);
             buffer.copy_instructions(exit, len);
@@ -789,7 +787,7 @@ impl AssemblerBuf {
     pub fn fixup_to_position(&mut self, fixup_pos: AsmFixupPos) {
         let off = self.fixups[fixup_pos.0];
         let val = self.buf.len() as u32;
-        (&mut self.buf[off .. off + 4]).write_u32::<LittleEndian>(val).unwrap();
+        LE::write_u32(&mut self.buf[off..(off + 4)], val);
     }
 
     pub unsafe fn copy_instructions(&mut self, source: *const u8, amt: usize) {
@@ -804,42 +802,42 @@ impl AssemblerBuf {
             // TODO USE IMAGINED BASE
             copy_instructions_ignore_shortjmp(&self.buf, out);
             for &fixup in self.fixups.iter() {
-                let prev = (&self.buf[fixup .. fixup + 4]).read_u32::<LittleEndian>().unwrap();
+                let prev = LE::read_u32(&self.buf[fixup..(fixup + 4)]);
                 write_unaligned(out.offset(fixup as isize), prev.wrapping_add(diff as u32));
             }
         }
     }
 
     pub fn pushfd(&mut self) {
-        self.buf.write_u8(0x9c).unwrap();
+        self.buf.push(0x9c);
     }
 
     pub fn push(&mut self, val: AsmValue) {
         match val {
             AsmValue::Undecided => {
-                self.buf.write_u8(0x68).unwrap();
+                self.buf.push(0x68);
                 self.fixups.push(self.buf.len());
-                self.buf.write_u32::<LittleEndian>(0).unwrap();
+                self.buf.extend_from_slice(&0u32.to_le_bytes());
             }
             AsmValue::Constant(val) => {
-                self.buf.write_u8(0x68).unwrap();
-                self.buf.write_u32::<LittleEndian>(val).unwrap();
+                self.buf.push(0x68);
+                self.buf.extend_from_slice(&(val as u32).to_le_bytes());
             }
             AsmValue::Register(reg) => {
-                self.buf.write_u8(0x50 + reg).unwrap();
+                self.buf.push(0x50 + reg);
             }
             AsmValue::Stack(pos) => {
                 let offset = i32::from(pos * 4) + self.stack_offset + 4;
                 match offset {
                     0 => {
-                        self.buf.write_all(&[0xff, 0x34, 0xe4]).unwrap();
+                        self.buf.extend_from_slice(&[0xff, 0x34, 0xe4]);
                     }
                     x if x < 0x80 => {
-                        self.buf.write_all(&[0xff, 0x74, 0xe4, x as u8]).unwrap();
+                        self.buf.extend_from_slice(&[0xff, 0x74, 0xe4, x as u8]);
                     }
                     x => {
-                        self.buf.write_all(&[0xff, 0xb4, 0xe4]).unwrap();
-                        self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
+                        self.buf.extend_from_slice(&[0xff, 0xb4, 0xe4]);
+                        self.buf.extend_from_slice(&(x as u32).to_le_bytes());
                     }
                 }
             }
@@ -851,7 +849,7 @@ impl AssemblerBuf {
     pub fn pop(&mut self, val: AsmValue) {
         match val {
             AsmValue::Register(reg) => {
-                self.buf.write_u8(0x58 + reg).unwrap();
+                self.buf.push(0x58 + reg);
             }
             _ => unimplemented!(),
         }
@@ -859,12 +857,12 @@ impl AssemblerBuf {
     }
 
     pub fn pushad(&mut self) {
-        self.buf.write_u8(0x60).unwrap();
+        self.buf.push(0x60);
         self.stack_offset += 8 * 4;
     }
 
     pub fn popad(&mut self) {
-        self.buf.write_u8(0x61).unwrap();
+        self.buf.push(0x61);
         self.stack_offset -= 8 * 4;
     }
 
@@ -872,26 +870,26 @@ impl AssemblerBuf {
         match (to, from) {
             (AsmValue::Register(to), AsmValue::Register(from)) => {
                 if to != from {
-                    self.buf.write_all(&[0x89, 0xc0 + from * 8 + to]).unwrap();
+                    self.buf.extend_from_slice(&[0x89, 0xc0 + from * 8 + to]);
                 }
             }
             (AsmValue::Register(to), AsmValue::Stack(from)) => {
                 let offset = (i32::from(from) * 4) + 4 + self.stack_offset;
                 match offset {
                     0 => {
-                        self.buf.write_all(&[0x8b, 0x4 + to * 8, 0xe4]).unwrap();
+                        self.buf.extend_from_slice(&[0x8b, 0x4 + to * 8, 0xe4]);
                     }
                     x if x < 0x80 => {
-                        self.buf.write_all(&[0x8b, 0x44 + to * 8, 0xe4, x as u8]).unwrap();
+                        self.buf.extend_from_slice(&[0x8b, 0x44 + to * 8, 0xe4, x as u8]);
                     }
                     x => {
-                        self.buf.write_all(&[0x8b, 0x84 + to * 8, 0xe4]).unwrap();
-                        self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
+                        self.buf.extend_from_slice(&[0x8b, 0x84 + to * 8, 0xe4]);
+                        self.buf.extend_from_slice(&(x as u32).to_le_bytes());
                     }
                 }
             }
             (AsmValue::Register(to), AsmValue::EaxPtr(offset)) => {
-                self.buf.write_all(&[0x8b, 0x40 + to * 8, offset as u8]).unwrap();
+                self.buf.extend_from_slice(&[0x8b, 0x40 + to * 8, offset as u8]);
             }
             (_, _) => unimplemented!(),
         }
@@ -903,16 +901,16 @@ impl AssemblerBuf {
                 let offset = (i32::from(from) * 4) + 4 + self.stack_offset;
                 match offset {
                     0 => {
-                        self.buf.write_all(&[0x8b, 0x4 + to * 8, 0x04 + reg * 8]).unwrap();
+                        self.buf.extend_from_slice(&[0x8b, 0x4 + to * 8, 0x04 + reg * 8]);
                     }
                     x if x < 0x80 => {
-                        self.buf.write_all(
+                        self.buf.extend_from_slice(
                             &[0x8b, 0x44 + to * 8, 0x04 + reg * 8, x as u8],
-                        ).unwrap();
+                        );
                     }
                     x => {
-                        self.buf.write_all(&[0x8b, 0x84 + to * 8, 0x04 + reg * 8]).unwrap();
-                        self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
+                        self.buf.extend_from_slice(&[0x8b, 0x84 + to * 8, 0x04 + reg * 8]);
+                        self.buf.extend_from_slice(&(x as u32).to_le_bytes());
                     }
                 }
             }
@@ -920,57 +918,55 @@ impl AssemblerBuf {
         }
     }
 
-    pub fn stack_add(&mut self, value: usize) {
+    fn stack_add_sub(&mut self, value: usize, add: bool) {
+        let byte2;
+        if add {
+            self.stack_offset -= value as i32;
+            byte2 = 0xc4;
+        } else {
+            self.stack_offset += value as i32;
+            byte2 = 0xec;
+        }
         match value {
             0 => (),
             x if x < 0x80 => {
-                self.buf.write_all(&[0x83, 0xc4, x as u8]).unwrap();
+                self.buf.extend_from_slice(&[0x83, byte2, x as u8]);
             }
             x => {
-                self.buf.write_all(&[0x81, 0xc4]).unwrap();
-                self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
+                self.buf.extend_from_slice(&[0x81, byte2]);
+                self.buf.extend_from_slice(&(x as u32).to_le_bytes());
             }
         }
-        self.stack_offset -= value as i32;
+    }
+
+    pub fn stack_add(&mut self, value: usize) {
+        self.stack_add_sub(value, true)
     }
 
     pub fn stack_sub(&mut self, value: usize) {
-        match value {
-            0 => (),
-            x if x < 0x80 => {
-                self.buf.write_all(&[0x83, 0xec, x as u8]).unwrap();
-            }
-            x => {
-                self.buf.write_all(&[0x81, 0xec]).unwrap();
-                self.buf.write_u32::<LittleEndian>(x as u32).unwrap();
-            }
-        }
-        self.stack_offset += value as i32;
+        self.stack_add_sub(value, false)
     }
 
     // NOTE: WONT UPDATE STACK OFFSET BECAUSE IT CANT
     pub fn stack_sub_reg(&mut self, register: u8) {
-        self.buf.write_all(&[0x29, 0xc4 + register * 8]).unwrap();
+        self.buf.extend_from_slice(&[0x29, 0xc4 + register * 8]);
     }
 
     pub fn ret(&mut self, stack_pop: usize) {
         if stack_pop == 0 {
-            self.buf.write_u8(0xc3).unwrap();
+            self.buf.push(0xc3);
         } else {
-            self.buf.write_u8(0xc2).unwrap();
-            self.buf.write_u16::<LittleEndian>(stack_pop as u16).unwrap();
+            self.buf.extend_from_slice(&[0xc2, stack_pop as u8, (stack_pop >> 8) as u8]);
         }
     }
 
     pub fn jump(&mut self, target: AsmValue) {
         match target {
             AsmValue::Constant(dest) => {
-                self.buf.write_all(&[0xc7, 0x44, 0xe4, 0xfc]).unwrap();
-                self.buf.write_u32::<LittleEndian>(dest).unwrap();
-                self.buf.write_all(&[0xff, 0x64, 0xe4, 0xfc]).unwrap();
+                self.jump_call_const(dest, true);
             }
             AsmValue::Register(dest) => {
-                self.buf.write_all(&[0xff, 0xe0 + dest]).unwrap();
+                self.buf.extend_from_slice(&[0xff, 0xe0 + dest]);
             }
             _ => unimplemented!(),
         }
@@ -982,7 +978,7 @@ impl AssemblerBuf {
                 self.call_const(dest);
             }
             AsmValue::Register(dest) => {
-                self.buf.write_all(&[0xff, 0xd0 + dest]).unwrap();
+                self.buf.extend_from_slice(&[0xff, 0xd0 + dest]);
             }
             _ => unimplemented!(),
         }
@@ -990,11 +986,21 @@ impl AssemblerBuf {
 
     // Returns position of dest so it can be overwritten later
     pub fn call_const(&mut self, target: u32) -> usize {
-        // Mov [esp-4], addr; call [esp - 4]
-        self.buf.write_all(&[0xc7, 0x44, 0xe4, 0xfc]).unwrap();
-        let ret = self.buf.len();
-        self.buf.write_u32::<LittleEndian>(target).unwrap();
-        self.buf.write_all(&[0xff, 0x54, 0xe4, 0xfc]).unwrap();
+        self.jump_call_const(target, false)
+    }
+
+    fn jump_call_const(&mut self, target: u32, is_jump: bool) -> usize {
+        let ret = self.buf.len() + 4;
+        let jump_or_call = if is_jump { 0x64 } else { 0x54 };
+        // Mov [esp-4], addr; call/jump [esp - 4]
+        // TODO It's actually pretty bad to assume that values even one word
+        // above esp can be relied on. Should do something else.
+        let mut slice = [
+            0xc7, 0x44, 0xe4, 0xfc, 0x00, 0x00, 0x00, 0x00,
+            0xff, jump_or_call, 0xe4, 0xfc,
+        ];
+        LE::write_u32(&mut slice[4..8], target);
+        self.buf.extend_from_slice(&slice);
         ret
     }
 }
@@ -1073,8 +1079,8 @@ unsafe fn copy_instructions(
                         .wrapping_sub(opcode.as_ptr() as usize);
                     dst.push(0xf);
                     dst.push(opcode[1]);
-                    let offset = (&opcode[2..]).read_u32::<LE>().unwrap();
-                    dst.write_u32::<LE>(offset.wrapping_sub(diff as u32)).unwrap();
+                    let offset = LE::read_u32(&opcode[2..6]);
+                    dst.extend_from_slice(&offset.wrapping_sub(diff as u32).to_le_bytes());
                 }
                 _ => {
                     let slice = slice::from_raw_parts(opcode.as_ptr(), ins_len as usize);
@@ -1088,14 +1094,14 @@ unsafe fn copy_instructions(
                 let offset = opcode[1] as i8 as u32;
                 dst.push(0xf);
                 dst.push(opcode[0] + 0x10);
-                dst.write_u32::<LE>(offset.wrapping_sub(diff as u32)).unwrap();
+                dst.extend_from_slice(&offset.wrapping_sub(diff as u32).to_le_bytes());
             }
             0xe8 | 0xe9 => {
                 assert!(ins_len == 5);
                 let diff = (dst_base as usize + dst.len()).wrapping_sub(opcode.as_ptr() as usize);
                 dst.push(opcode[0]);
-                let offset = (&opcode[1..]).read_u32::<LE>().unwrap();
-                dst.write_u32::<LE>(offset.wrapping_sub(diff as u32)).unwrap();
+                let offset = LE::read_u32(&opcode[1..5]);
+                dst.extend_from_slice(&offset.wrapping_sub(diff as u32).to_le_bytes());
             }
             // Short jump
             0xeb => {
@@ -1104,7 +1110,7 @@ unsafe fn copy_instructions(
                 let offset = opcode[1] as i8 as u32;
                 dst.push(0xe9);
                 dst.push(opcode[0] + 0x10);
-                dst.write_u32::<LE>(offset.wrapping_sub(diff as u32)).unwrap();
+                dst.extend_from_slice(&offset.wrapping_sub(diff as u32).to_le_bytes());
             }
             _ => {
                 let slice = slice::from_raw_parts(opcode.as_ptr(), ins_len as usize);

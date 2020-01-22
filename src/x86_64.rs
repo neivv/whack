@@ -1,10 +1,9 @@
 use std::mem;
 use std::ptr;
 use std::slice;
-use std::io::Write;
 
 use lde;
-use byteorder::{LE, ReadBytesExt, WriteBytesExt};
+use byteorder::{ByteOrder, LE};
 use smallvec::SmallVec;
 
 use helpers::*;
@@ -552,8 +551,8 @@ impl AssemblerBuf {
         let const_offset_begin = self.buf.len() + self.fixups.len() * 8;
         for &(fixup, value) in self.fixups.iter().chain(self.constants.iter()) {
             let offset = self.buf.len() - fixup - 4;
-            self.buf.write_u64::<LE>(value).unwrap();
-            (&mut self.buf[fixup .. fixup + 4]).write_u32::<LE>(offset as u32).unwrap();
+            self.buf.extend_from_slice(&(value as u64).to_le_bytes());
+            LE::write_u32(&mut self.buf[fixup..(fixup + 4)], offset as u32);
         }
         self.align(16);
         ConstOffsets(const_offset_begin)
@@ -563,8 +562,7 @@ impl AssemblerBuf {
         let diff = out as usize;
         ptr::copy_nonoverlapping(self.buf.as_ptr(), out, self.buf.len());
         for &(fixup, value) in self.fixups.iter() {
-            let value_pos = fixup + 4 +
-                (&self.buf[fixup .. fixup + 4]).read_u32::<LE>().unwrap() as usize;
+            let value_pos = fixup + 4 + LE::read_u32(&self.buf[fixup..(fixup + 4)]) as usize;
             write_unaligned(out.offset(value_pos as isize), value.wrapping_add(diff as u64));
         }
     }
@@ -572,33 +570,31 @@ impl AssemblerBuf {
     pub fn push(&mut self, val: AsmValue) {
         match val {
             AsmValue::Undecided => {
-                self.buf.write_all(&[0xff, 0x35]).unwrap();
-                self.fixups.push((self.buf.len(), 0));
-                self.buf.write_u32::<LE>(0).unwrap();
+                self.buf.extend_from_slice(&[0xff, 0x35, 0x00, 0x00, 0x00, 0x00]);
+                self.fixups.push((self.buf.len() - 4, 0));
             }
             AsmValue::Constant(val) => {
-                self.buf.write_all(&[0xff, 0x35]).unwrap();
-                self.constants.push((self.buf.len(), val));
-                self.buf.write_u32::<LE>(0).unwrap();
+                self.buf.extend_from_slice(&[0xff, 0x35, 0x00, 0x00, 0x00, 0x00]);
+                self.constants.push((self.buf.len() - 4, val));
             }
             AsmValue::Register(reg) => {
                 if reg >= 8 {
-                    self.buf.write_u8(0x41).unwrap();
+                    self.buf.push(0x41);
                 }
-                self.buf.write_u8(0x50 + (reg & 7)).unwrap();
+                self.buf.push(0x50 + (reg & 7));
             }
             AsmValue::Stack(pos) => {
                 let offset = i32::from(pos * 8) + self.stack_offset + 8;
                 match offset {
                     0 => {
-                        self.buf.write_all(&[0xff, 0x34, 0xe4]).unwrap();
+                        self.buf.extend_from_slice(&[0xff, 0x34, 0xe4]);
                     }
                     x if x < 0x80 => {
-                        self.buf.write_all(&[0xff, 0x74, 0xe4, x as u8]).unwrap();
+                        self.buf.extend_from_slice(&[0xff, 0x74, 0xe4, x as u8]);
                     }
                     x => {
-                        self.buf.write_all(&[0xff, 0xb4, 0xe4]).unwrap();
-                        self.buf.write_u32::<LE>(x as u32).unwrap();
+                        self.buf.extend_from_slice(&[0xff, 0xb4, 0xe4]);
+                        self.buf.extend_from_slice(&(x as u32).to_le_bytes());
                     }
                 }
             }
@@ -610,9 +606,9 @@ impl AssemblerBuf {
         match val {
             AsmValue::Register(reg) => {
                 if reg >= 8 {
-                    self.buf.write_u8(0x41).unwrap();
+                    self.buf.push(0x41);
                 }
-                self.buf.write_u8(0x58 + (reg & 7)).unwrap();
+                self.buf.push(0x58 + (reg & 7));
             }
             _ => unimplemented!(),
         }
@@ -621,28 +617,28 @@ impl AssemblerBuf {
 
     pub fn pushad(&mut self) {
         for x in 0x50..0x55 {
-            self.buf.write_u8(x).unwrap();
+            self.buf.push(x);
         }
         // Skip rsp
         for x in 0x56..0x58 {
-            self.buf.write_u8(x).unwrap();
+            self.buf.push(x);
         }
         for x in 0x50..0x58 {
-            self.buf.write_all(&[0x41, x]).unwrap();
+            self.buf.extend_from_slice(&[0x41, x]);
         }
         self.stack_offset += 15 * 8;
     }
 
     pub fn popad(&mut self) {
         for x in (0x58..0x60).rev() {
-            self.buf.write_all(&[0x41, x]).unwrap();
+            self.buf.extend_from_slice(&[0x41, x]);
         }
         for x in (0x5e..0x60).rev() {
-            self.buf.write_u8(x).unwrap();
+            self.buf.push(x);
         }
         // Skip rsp
         for x in (0x58..0x5d).rev() {
-            self.buf.write_u8(x).unwrap();
+            self.buf.push(x);
         }
         self.stack_offset -= 15 * 8;
     }
@@ -653,41 +649,41 @@ impl AssemblerBuf {
                 if to != from {
                     let reg_spec_byte = 0x48 + if to >= 8 { 1 } else { 0 } +
                         if from >= 8 { 4 } else { 0 };
-                    self.buf.write_u8(reg_spec_byte).unwrap();
-                    self.buf.write_u8(0x89).unwrap();
-                    self.buf.write_u8(0xc0 + (from & 7) * 8 + (to & 7)).unwrap();
+                    self.buf.extend_from_slice(
+                        &[reg_spec_byte, 0x89, 0xc0 + (from & 7) * 8 + (to & 7)],
+                    );
                 }
             }
             (AsmValue::Register(to), AsmValue::Stack(from)) => {
                 let reg_spec_byte = 0x48 + if to >= 8 { 4 } else { 0 };
-                self.buf.write_u8(reg_spec_byte).unwrap();
+                self.buf.push(reg_spec_byte);
                 let offset = (i32::from(from) * 8) + 8 + self.stack_offset;
                 match offset {
                     0 => {
-                        self.buf.write_all(&[0x8b, 0x4 + (to & 7) * 8, 0xe4]).unwrap();
+                        self.buf.extend_from_slice(&[0x8b, 0x4 + (to & 7) * 8, 0xe4]);
                     }
                     x if x < 0x80 => {
-                        self.buf.write_all(&[0x8b, 0x44 + (to & 7) * 8, 0xe4, x as u8]).unwrap();
+                        self.buf.extend_from_slice(&[0x8b, 0x44 + (to & 7) * 8, 0xe4, x as u8]);
                     }
                     x => {
-                        self.buf.write_all(&[0x8b, 0x84 + (to & 7) * 8, 0xe4]).unwrap();
-                        self.buf.write_u32::<LE>(x as u32).unwrap();
+                        self.buf.extend_from_slice(&[0x8b, 0x84 + (to & 7) * 8, 0xe4]);
+                        self.buf.extend_from_slice(&(x as u32).to_le_bytes());
                     }
                 }
             }
             (AsmValue::Register(to), AsmValue::Undecided) => {
                 let reg_spec_byte = 0x48 + if to >= 8 { 4 } else { 0 };
-                self.buf.write_u8(reg_spec_byte).unwrap();
-                self.buf.write_u8(0x8b).unwrap();
-                self.buf.write_u8(0x5 + (to & 7) * 8).unwrap();
-                self.fixups.push((self.buf.len(), 0));
-                self.buf.write_u32::<LE>(0).unwrap();
+                self.buf.extend_from_slice(
+                    &[reg_spec_byte, 0x8b, 0x5 + (to & 7) * 8, 0x00, 0x00, 0x00, 0x00],
+                );
+                self.fixups.push((self.buf.len() - 4, 0));
             }
             (AsmValue::Register(to), AsmValue::Constant(val)) => {
                 let reg_spec_byte = 0x48 + if to >= 8 { 4 } else { 0 };
-                self.buf.write_all(&[reg_spec_byte, 0x8b, (to & 7) * 8 + 0x5]).unwrap();
-                self.constants.push((self.buf.len(), val));
-                self.buf.write_u32::<LE>(0).unwrap();
+                self.buf.extend_from_slice(
+                    &[reg_spec_byte, 0x8b, (to & 7) * 8 + 0x5, 0x00, 0x00, 0x00, 0x00],
+                );
+                self.constants.push((self.buf.len() - 4, val));
             }
             (_, _) => unimplemented!(),
         }
@@ -697,11 +693,11 @@ impl AssemblerBuf {
         match value {
             0 => (),
             x if x < 0x80 => {
-                self.buf.write_all(&[0x48, 0x83, 0xc4, x as u8]).unwrap();
+                self.buf.extend_from_slice(&[0x48, 0x83, 0xc4, x as u8]);
             }
             x => {
-                self.buf.write_all(&[0x48, 0x81, 0xc4]).unwrap();
-                self.buf.write_u32::<LE>(x as u32).unwrap();
+                self.buf.extend_from_slice(&[0x48, 0x81, 0xc4]);
+                self.buf.extend_from_slice(&(x as u32).to_le_bytes());
             }
         }
         self.stack_offset -= value as i32;
@@ -711,11 +707,11 @@ impl AssemblerBuf {
         match value {
             0 => (),
             x if x < 0x80 => {
-                self.buf.write_all(&[0x48, 0x83, 0xec, x as u8]).unwrap();
+                self.buf.extend_from_slice(&[0x48, 0x83, 0xec, x as u8]);
             }
             x => {
-                self.buf.write_all(&[0x48, 0x81, 0xec]).unwrap();
-                self.buf.write_u32::<LE>(x as u32).unwrap();
+                self.buf.extend_from_slice(&[0x48, 0x81, 0xec]);
+                self.buf.extend_from_slice(&(x as u32).to_le_bytes());
             }
         }
         self.stack_offset += value as i32;
@@ -723,25 +719,23 @@ impl AssemblerBuf {
 
     pub fn ret(&mut self, stack_pop: usize) {
         if stack_pop == 0 {
-            self.buf.write_u8(0xc3).unwrap();
+            self.buf.push(0xc3);
         } else {
-            self.buf.write_u8(0xc2).unwrap();
-            self.buf.write_u16::<LE>(stack_pop as u16).unwrap();
+            self.buf.extend_from_slice(&[0xc2, stack_pop as u8, (stack_pop >> 8) as u8]);
         }
     }
 
     pub fn jump(&mut self, target: AsmValue) {
         match target {
             AsmValue::Constant(dest) => {
-                self.buf.write_all(&[0xff, 0x25]).unwrap();
-                self.constants.push((self.buf.len(), dest));
-                self.buf.write_u32::<LE>(0).unwrap();
+                self.buf.extend_from_slice(&[0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
+                self.constants.push((self.buf.len() - 4, dest));
             }
             AsmValue::Register(dest) => {
                 if dest >= 8 {
-                    self.buf.write_u8(0x41).unwrap();
+                    self.buf.push(0x41);
                 }
-                self.buf.write_all(&[0xff, 0xe0 + (dest & 7)]).unwrap();
+                self.buf.extend_from_slice(&[0xff, 0xe0 + (dest & 7)]);
             }
             _ => unimplemented!(),
         }
@@ -754,18 +748,17 @@ impl AssemblerBuf {
             }
             AsmValue::Register(dest) => {
                 if dest >= 8 {
-                    self.buf.write_u8(0x41).unwrap();
+                    self.buf.push(0x41);
                 }
-                self.buf.write_all(&[0xff, 0xd0 + (dest & 7)]).unwrap();
+                self.buf.extend_from_slice(&[0xff, 0xd0 + (dest & 7)]);
             }
             _ => unimplemented!(),
         }
     }
 
     fn call_const(&mut self, val: u64) -> ConstOffset{
-        self.buf.write_all(&[0xff, 0x15]).unwrap();
-        self.constants.push((self.buf.len(), val));
-        self.buf.write_u32::<LE>(0).unwrap();
+        self.buf.extend_from_slice(&[0xff, 0x15, 0x00, 0x00, 0x00, 0x00]);
+        self.constants.push((self.buf.len() - 4, val));
         ConstOffset(self.constants.len() - 1)
     }
 }
@@ -792,14 +785,14 @@ unsafe fn copy_instructions(
             dst.extend_from_slice(&[0x48, 0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
             let offset = *(pos.add(3) as *const i32);
             let dest = *(pos.offset(offset as isize + 7) as *const u64);
-            dst.write_u64::<LE>(dest).unwrap();
+            dst.extend_from_slice(&(dest as u64).to_le_bytes());
         } else if opcode[0] == 0xe9 {
             // Long jump
             // replace with jmp [rip + 7]; db xxxx_xxxx_xxxx_xxxx
             dst.extend_from_slice(&[0x48, 0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
             let offset = *(pos.add(1) as *const i32);
             let dest = ((pos as isize + 5).wrapping_add(offset as isize)) as u64;
-            dst.write_u64::<LE>(dest).unwrap();
+            dst.extend_from_slice(&(dest as u64).to_le_bytes());
         } else {
             let slice = slice::from_raw_parts(opcode.as_ptr(), ins_len as usize);
             dst.extend_from_slice(slice);

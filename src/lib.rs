@@ -1,8 +1,3 @@
-#![cfg_attr(feature = "cargo-clippy", allow(
-    needless_pass_by_value, match_bool, trivially_copy_pass_by_ref, new_without_default,
-    redundant_closure, ptr_arg, new_without_default_derive, len_without_is_empty,
-))]
-
 extern crate byteorder;
 extern crate lde;
 extern crate libc;
