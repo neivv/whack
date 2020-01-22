@@ -1,6 +1,5 @@
 extern crate byteorder;
 extern crate lde;
-extern crate libc;
 extern crate smallvec;
 extern crate winapi;
 
@@ -44,8 +43,7 @@ use std::ffi::OsStr;
 use std::marker::{PhantomData, Sync};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
-
-use libc::c_void;
+use std::os::raw::c_void;
 
 use smallvec::SmallVec;
 
@@ -522,11 +520,9 @@ impl Patcher {
     /// # Examples
     /// ```rust
     /// #[macro_use] extern crate whack;
-    /// extern crate libc;
     ///
+    /// use std::os::raw::c_void;
     /// use std::sync::Mutex;
-    ///
-    /// use libc::c_void;
     ///
     /// // Addresses aren't relevant here, there just isn't a specialized macro for
     /// // `custom_calling_convention`.

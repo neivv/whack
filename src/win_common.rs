@@ -4,9 +4,8 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
+use std::os::raw::c_void;
 use std::ptr;
-
-use libc::c_void;
 
 use winapi::shared::minwindef::HMODULE;
 use winapi::um::errhandlingapi::GetLastError;

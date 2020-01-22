@@ -6,7 +6,6 @@ version = "0.2.0"
 [dependencies]
 byteorder = { version = "1.2", default-features = false }
 lde = "0.3"
-libc = "0.2"
 smallvec = "1.0"
 
 [dependencies.winapi]
