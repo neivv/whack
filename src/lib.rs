@@ -327,7 +327,10 @@ impl HookPatch {
             let (entry, exit, parent) = code.write_wrapper(
                 Some(to_abs(entry)),
                 Some(to_abs(exit)),
-                Some(to_abs(inline_parent_entry)),
+                match inline_parent_entry != 0 {
+                    true => Some(to_abs(inline_parent_entry)),
+                    false => None,
+                },
                 heap,
                 None,
             );
