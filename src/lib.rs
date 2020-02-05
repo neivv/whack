@@ -712,6 +712,16 @@ impl<'b> ModulePatcher<'b> {
         self.add_hook::<H, T>(target, HookType::InlineNoOrig(H::address()))
     }
 
+    /// Hooks to inspect state at `address` (relative to module base)
+    ///
+    /// The hook's callback has a function to call orig, but calling it is undefined.
+    /// (This is somewhat hacky function to quickly add support for inspecting hooks
+    /// at dynamically known address)
+    pub unsafe fn call_hook_closure_address<H, T>(&mut self, _hook: H, target: T, address: usize) -> Patch
+    where H: AddressHookClosure<T> {
+        self.add_hook::<H, T>(target, HookType::InlineNoOrig(address))
+    }
+
     unsafe fn add_hook<H, T>(&mut self, target: T, ty: HookType) -> Patch
     where H: AddressHookClosure<T> {
         let target = H::write_target_objects(target);
