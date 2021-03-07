@@ -779,17 +779,24 @@ unsafe fn copy_instructions(
             return;
         }
         let ins_len = opcode.len() as isize;
-        if opcode.len() == 7 && &opcode[..3] == [0x48, 0xff, 0x25] {
-            // Jmp [rip + offset],
-            // replace with jmp [rip + 7]; db xxxx_xxxx_xxxx_xxxx
-            dst.extend_from_slice(&[0x48, 0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
+        if opcode.len() == 7 && &opcode[1..3] == &[0xff, 0x25] && opcode[0] & 0xf0 == 0x40 {
+            // Jmp [rip + offset] with (unnecessary) rex prefix
+            // replace with jmp [rip + 6]; db xxxx_xxxx_xxxx_xxxx
             let offset = *(pos.add(3) as *const i32);
             let dest = *(pos.offset(offset as isize + 7) as *const u64);
+            dst.extend_from_slice(&[0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
+            dst.extend_from_slice(&(dest as u64).to_le_bytes());
+        } else if opcode.len() == 6 && &opcode[..2] == [0xff, 0x25] {
+            // Jmp [rip + offset]
+            // replace with jmp [rip + 6]; db xxxx_xxxx_xxxx_xxxx
+            let offset = *(pos.add(2) as *const i32);
+            let dest = *(pos.offset(offset as isize + 6) as *const u64);
+            dst.extend_from_slice(&[0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
             dst.extend_from_slice(&(dest as u64).to_le_bytes());
         } else if opcode[0] == 0xe9 {
             // Long jump
-            // replace with jmp [rip + 7]; db xxxx_xxxx_xxxx_xxxx
-            dst.extend_from_slice(&[0x48, 0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
+            // replace with jmp [rip + 6]; db xxxx_xxxx_xxxx_xxxx
+            dst.extend_from_slice(&[0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
             let offset = *(pos.add(1) as *const i32);
             let dest = ((pos as isize + 5).wrapping_add(offset as isize)) as u64;
             dst.extend_from_slice(&(dest as u64).to_le_bytes());
