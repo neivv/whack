@@ -20,7 +20,7 @@ pub struct PatchMap<Value> {
 }
 
 impl<Value> PatchMap<Value> {
-    pub fn new() -> PatchMap<Value> {
+    pub const fn new() -> PatchMap<Value> {
         PatchMap {
             active_entries: Vec::new(),
             deleted_entries: Vec::new(),

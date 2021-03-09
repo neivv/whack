@@ -428,7 +428,7 @@ pub struct ModulePatcher<'b> {
 
 impl Patcher {
     /// Creates a new `Patcher`.
-    pub fn new() -> Patcher {
+    pub const fn new() -> Patcher {
         Patcher {
             patches: PatchMap::new(),
             patch_groups: PatchMap::new(),

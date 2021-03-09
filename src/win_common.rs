@@ -53,13 +53,16 @@ unsafe impl Send for ExecutableHeap {
 }
 
 impl ExecutableHeap {
-    pub fn new() -> ExecutableHeap {
+    pub const fn new() -> ExecutableHeap {
         ExecutableHeap {
-            handle: unsafe { HeapCreate(winnt::HEAP_CREATE_ENABLE_EXECUTE, 0, 0) },
+            handle: 0 as HANDLE,
         }
     }
 
     pub fn allocate(&mut self, size: usize) -> *mut u8 {
+        if self.handle.is_null() {
+            self.handle = unsafe { HeapCreate(winnt::HEAP_CREATE_ENABLE_EXECUTE, 0, 0) };
+        }
         unsafe { HeapAlloc(self.handle, 0, size) as *mut u8 }
     }
 
