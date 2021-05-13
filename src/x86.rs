@@ -1109,7 +1109,6 @@ unsafe fn copy_instructions(
                     .wrapping_sub(opcode.as_ptr() as usize + 2);
                 let offset = opcode[1] as i8 as u32;
                 dst.push(0xe9);
-                dst.push(opcode[0] + 0x10);
                 dst.extend_from_slice(&offset.wrapping_sub(diff as u32).to_le_bytes());
             }
             _ => {
