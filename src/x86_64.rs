@@ -235,8 +235,9 @@ impl HookWrapAssembler {
             buffer.stack_add(align_size);
             unsafe {
                 let len = ins_len(orig, JUMP_INS_LEN);
-                buffer.copy_instructions(orig, len);
-                buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
+                buffer.copy_instructions(orig, len, |buffer| {
+                    buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
+                });
             }
         } else {
             buffer.stack_add(align_size);
@@ -316,8 +317,9 @@ impl HookWrapAssembler {
                 let len = ins_len(orig, 6 + 8);
                 let ret_address = buffer.fixup_position();
                 buffer.push(AsmValue::Undecided);
-                buffer.copy_instructions(orig, len);
-                buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
+                buffer.copy_instructions(orig, len, |buffer| {
+                    buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
+                });
                 buffer.fixup_to_position(ret_address);
             }
             None
@@ -543,8 +545,18 @@ impl AssemblerBuf {
         }
     }
 
-    pub unsafe fn copy_instructions(&mut self, source: *const u8, amt: usize) {
-        copy_instructions(source, &mut self.buf, amt);
+    /// Instruction copying needs some extra buffer for expanded rip-relative
+    /// jumps/calls, which will be inserted after the callback returns.
+    /// So any code that wants to be inserted after copied instructions
+    /// should be added in the callback, ending with a jump/etc.
+    unsafe fn copy_instructions<F>(&mut self, source: *const u8, amt: usize, cb: F)
+    where F: FnOnce(&mut Self)
+    {
+        let copy_start = self.buf.len();
+        copy_instructions_reserve(source, &mut self.buf, amt);
+        let copy_end = self.buf.len();
+        cb(self);
+        copy_instructions(source, &mut self.buf, copy_start, copy_end, amt);
     }
 
     fn write_fixups(&mut self) -> ConstOffsets {
@@ -763,20 +775,20 @@ impl AssemblerBuf {
     }
 }
 
-// Dst_base is the address at which the code is *imagined* to be at, so it won't matter if
-// the vector is reallocated.
-//
-// (The rest of the code doesn't actually work with that yet though)
+/// Copies instructions to dest[dest_pos..dest_end], appending to dest
+/// if needed for long jumps
 unsafe fn copy_instructions(
     src: *const u8,
     dst: &mut Vec<u8>,
+    mut dest_pos: usize,
+    dest_end: usize,
     min_length: usize,
 ) {
     let mut len = min_length as isize;
     let mut pos = src;
     for (opcode, _) in lde::X64.iter(slice::from_raw_parts(src, min_length + 32), 0) {
         if len <= 0 {
-            return;
+            break;
         }
         let ins_len = opcode.len() as isize;
         if opcode.len() == 7 && &opcode[1..3] == &[0xff, 0x25] && opcode[0] & 0xf0 == 0x40 {
@@ -784,32 +796,82 @@ unsafe fn copy_instructions(
             // replace with jmp [rip + 6]; db xxxx_xxxx_xxxx_xxxx
             let offset = *(pos.add(3) as *const i32);
             let dest = *(pos.offset(offset as isize + 7) as *const u64);
-            dst.extend_from_slice(&[0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
+
+            let db_offset = (dst.len() - (dest_pos + 6)) as u32;
+            let out = &mut dst[dest_pos..][..6];
+            out[0] = 0xff;
+            out[1] = 0x25;
+            LE::write_u32(&mut out[2..], db_offset);
             dst.extend_from_slice(&(dest as u64).to_le_bytes());
+            dest_pos += 6;
         } else if opcode.len() == 6 && &opcode[..2] == [0xff, 0x25] {
             // Jmp [rip + offset]
             // replace with jmp [rip + 6]; db xxxx_xxxx_xxxx_xxxx
             let offset = *(pos.add(2) as *const i32);
             let dest = *(pos.offset(offset as isize + 6) as *const u64);
-            dst.extend_from_slice(&[0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
+
+            let db_offset = (dst.len() - (dest_pos + 6)) as u32;
+            let out = &mut dst[dest_pos..][..6];
+            out[0] = 0xff;
+            out[1] = 0x25;
+            LE::write_u32(&mut out[2..], db_offset);
             dst.extend_from_slice(&(dest as u64).to_le_bytes());
-        } else if opcode[0] == 0xe9 {
-            // Long jump
+            dest_pos += 6;
+        } else if opcode[0] == 0xe9 || opcode[0] == 0xe8 {
+            // Long jump / call
             // replace with jmp [rip + 6]; db xxxx_xxxx_xxxx_xxxx
-            dst.extend_from_slice(&[0xff, 0x25, 0x00, 0x00, 0x00, 0x00]);
+            let second_byte = match opcode[0] == 0xe9 {
+                true => 0x25,
+                false => 0x15,
+            };
             let offset = *(pos.add(1) as *const i32);
             let dest = ((pos as isize + 5).wrapping_add(offset as isize)) as u64;
+
+            let db_offset = (dst.len() - (dest_pos + 6)) as u32;
+            let out = &mut dst[dest_pos..][..6];
+            out[0] = 0xff;
+            out[1] = second_byte;
+            LE::write_u32(&mut out[2..], db_offset);
             dst.extend_from_slice(&(dest as u64).to_le_bytes());
+            dest_pos += 6;
         } else {
             let slice = slice::from_raw_parts(opcode.as_ptr(), ins_len as usize);
-            dst.extend_from_slice(slice);
+            dst[dest_pos..][..slice.len()].copy_from_slice(slice);
+            dest_pos += slice.len();
+        }
+        pos = pos.add(ins_len as usize);
+        len -= ins_len;
+    }
+    assert_eq!(dest_pos, dest_end);
+}
+
+unsafe fn copy_instructions_reserve(
+    src: *const u8,
+    dst: &mut Vec<u8>,
+    min_length: usize,
+) {
+    let mut len = min_length as isize;
+    let mut pos = src;
+    let mut reserve_length = 0;
+    for (opcode, _) in lde::X64.iter(slice::from_raw_parts(src, min_length + 32), 0) {
+        if len <= 0 {
+            break;
+        }
+        let ins_len = opcode.len() as isize;
+        if opcode.len() == 7 && &opcode[1..3] == &[0xff, 0x25] && opcode[0] & 0xf0 == 0x40 {
+            reserve_length += 6;
+        } else if opcode.len() == 6 && &opcode[..2] == [0xff, 0x25] {
+            reserve_length += 6;
+        } else if opcode[0] == 0xe9 || opcode[0] == 0xe8 {
+            reserve_length += 6;
+        } else {
+            reserve_length += ins_len as usize;
         }
         pos = pos.offset(ins_len);
         len -= ins_len;
     }
-    if len != 0 {
-        panic!("Could not disassemble {:x}", src as usize);
-    }
+    let new_len = dst.len() + reserve_length;
+    dst.resize(new_len, 0u8);
 }
 
 pub unsafe fn ins_len(ins: *const u8, min_length: usize) -> usize {
