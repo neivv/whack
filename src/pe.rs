@@ -101,7 +101,7 @@ unsafe fn import_table(image_base: usize) -> Option<(usize, u32, bool)> {
 #[test]
 fn test_import_ptr() {
     unsafe {
-        let addr = ::platform::exe_handle() as usize;
+        let addr = crate::platform::exe_handle() as usize;
         assert!(import_ptr(addr, b"kernel32.dll", &Export::Name(b"GetProcAddress")).is_some());
         assert!(import_ptr(addr, b"KERNEL32.dll", &Export::Name(b"GetProcAddress")).is_some());
         assert!(import_ptr(addr, b"kernel32.dll", &Export::Name(b"HeapAlloc")).is_some());

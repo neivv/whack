@@ -101,9 +101,9 @@ macro_rules! whack_hook_impl_private {
             extern fn in_wrap(
                 $($an: $aty,)*
                 orig: extern fn($($aty),*) -> $ret,
-                real: *const *const Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret,
+                real: *const *const dyn Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret,
             ) -> $ret {
-                let real: &Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret =
+                let real: &dyn Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret =
                     unsafe { &**real };
                 real($($an,)* orig)
             }
@@ -131,7 +131,7 @@ macro_rules! whack_hook_wrapper_impl {
         fn write_target_objects(target: T) -> Box<[u8]> {
             unsafe {
                 let fat_ptr_size = ::std::mem::size_of::<
-                    *const Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret
+                    *const dyn Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret
                 >();
                 let size = ::std::mem::size_of::<T>() + fat_ptr_size;
                 let out = vec![0u8; size].into_boxed_slice();
@@ -139,10 +139,10 @@ macro_rules! whack_hook_wrapper_impl {
                 let target_mem = out.as_ptr().offset(fat_ptr_size as isize) as *mut T;
                 ::std::ptr::write_unaligned(target_mem, target);
                 let target_ptr:
-                    *const Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret = target_mem;
+                    *const dyn Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret = target_mem;
                 ::std::ptr::write_unaligned(
                     out.as_ptr() as
-                        *mut *const Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret,
+                        *mut *const dyn Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret,
                     target_ptr,
                 );
                 out

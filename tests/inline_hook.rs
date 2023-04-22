@@ -8,8 +8,8 @@ mod x86 {
     use std::io::Read;
     use std::mem;
 
-    use x86::byteorder::{ReadBytesExt, LE};
-    use x86::whack::*;
+    use crate::x86::byteorder::{ReadBytesExt, LE};
+    use crate::x86::whack::*;
 
     whack_hook_decls!(
         InlineDecl(u32, u32, *mut u32);

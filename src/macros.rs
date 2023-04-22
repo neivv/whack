@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use platform;
-use Patch;
+use crate::platform;
+use crate::{Patch, ModulePatcher};
 
 pub trait AddressHookClosure<Callback>: AddressHook {
     fn address() -> usize;
@@ -15,18 +15,18 @@ pub trait AddressHookClosure<Callback>: AddressHook {
 pub trait AddressHook {
     type Fnptr;
     type OptFnptr;
-    unsafe fn hook(self, patch: &mut ::ModulePatcher, val: Self::Fnptr) -> Patch;
-    unsafe fn hook_opt(self, patch: &mut ::ModulePatcher, val: Self::OptFnptr) -> Patch;
-    unsafe fn call_hook(self, patch: &mut ::ModulePatcher, val: Self::Fnptr) -> Patch;
+    unsafe fn hook(self, patch: &mut ModulePatcher, val: Self::Fnptr) -> Patch;
+    unsafe fn hook_opt(self, patch: &mut ModulePatcher, val: Self::OptFnptr) -> Patch;
+    unsafe fn call_hook(self, patch: &mut ModulePatcher, val: Self::Fnptr) -> Patch;
     unsafe fn custom_calling_convention(
         self,
         val: Self::Fnptr,
-        exec_heap: &mut ::platform::ExecutableHeap,
+        exec_heap: &mut platform::ExecutableHeap,
     ) -> *const u8;
     /// Generates the wrapper code, which may be used multiple times.
     ///
     /// `target` must be kept alive as long as any of the wrappers generated exist.
-    fn wrapper_assembler(target: *const u8) -> ::platform::HookWrapAssembler;
+    fn wrapper_assembler(target: *const u8) -> platform::HookWrapAssembler;
 }
 
 pub trait HookDeclClosure<Callback>: HookDecl {
@@ -35,11 +35,11 @@ pub trait HookDeclClosure<Callback>: HookDecl {
 
 pub trait HookDecl {
     // For inline hooks, that is
-    fn wrapper_assembler_inline(target: *const u8) -> ::platform::HookWrapAssembler;
+    fn wrapper_assembler_inline(target: *const u8) -> platform::HookWrapAssembler;
 }
 
 pub trait ExportHookClosure<Callback>: ExportHook {
-    fn default_export() -> ::Export<'static>;
+    fn default_export() -> crate::Export<'static>;
     fn write_target_objects(target: Callback) -> Box<[u8]>;
 }
 
@@ -48,17 +48,17 @@ pub trait ExportHook {
     type OptFnptr;
     unsafe fn import(
         self,
-        patch: &mut ::ModulePatcher,
+        patch: &mut ModulePatcher,
         dll: Cow<'static, [u8]>,
         val: Self::Fnptr,
     ) -> Patch;
     unsafe fn import_opt(
         self,
-        patch: &mut ::ModulePatcher,
+        patch: &mut ModulePatcher,
         dll: Cow<'static, [u8]>,
         val: Self::OptFnptr,
     ) -> Patch;
-    fn wrapper_assembler(target: *const u8) -> ::platform::HookWrapAssembler;
+    fn wrapper_assembler(target: *const u8) -> platform::HookWrapAssembler;
 }
 
 /// Declares a library import hook.
@@ -157,10 +157,10 @@ macro_rules! whack_impl_hook_decl {
             extern fn in_wrap_inline(
                 $($an: $aty,)*
                 orig: extern fn(*mut $crate::platform::InlineCallCtx, $($aty),*) -> $ret,
-                real: *const *const Fn($($aty,)* &dyn Fn($($aty),*) -> $ret) -> $ret,
+                real: *const *const dyn Fn($($aty,)* &dyn Fn($($aty),*) -> $ret) -> $ret,
                 params: *mut $crate::platform::InlineCallCtx,
             ) -> () {
-                let real: &Fn($($aty,)* &dyn Fn($($aty),*) -> $ret) -> $ret =
+                let real: &dyn Fn($($aty,)* &dyn Fn($($aty),*) -> $ret) -> $ret =
                     unsafe { &**real };
                 real($($an,)* &|$($an),*| {
                     unsafe {

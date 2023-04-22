@@ -6,10 +6,11 @@ use lde;
 use byteorder::{ByteOrder, LE};
 use smallvec::SmallVec;
 
-use helpers::*;
-use insertion_sort;
-use OrigFuncCallback;
-pub use win_common::*;
+use crate::helpers::*;
+use crate::insertion_sort;
+use crate::{GeneratedHook, OrigFuncCallback};
+
+pub use crate::win_common::*;
 
 const JUMP_INS_LEN: usize = 14;
 #[inline]
@@ -442,7 +443,7 @@ impl HookWrapCode {
         _inline_parent_entry: Option<*const u8>,
         heap: &mut ExecutableHeap,
         import_fixup: Option<*const u8>,
-    ) -> (::GeneratedHook, Option<::GeneratedHook>, Option<::GeneratedHook>) {
+    ) -> (GeneratedHook, Option<GeneratedHook>, Option<GeneratedHook>) {
         let ins_len = |x| { unsafe { ins_len(x, JUMP_INS_LEN) } };
 
         let entry_orig_ins_len = entry.map(&ins_len).unwrap_or(0);
@@ -487,13 +488,13 @@ impl HookWrapCode {
             *ptr = exit_wrapper;
             ptr
         };
-        let entry = ::GeneratedHook {
+        let entry = GeneratedHook {
             wrapper,
             orig_ins_len: entry_orig_ins_len,
             orig_ins: entry_orig_ins_ptr,
             pointer_to_wrapper: entry_pointer_to_wrapper,
         };
-        let exit = exit.map(|_| ::GeneratedHook {
+        let exit = exit.map(|_| GeneratedHook {
             wrapper: exit_wrapper,
             orig_ins_len: exit_orig_ins_len,
             orig_ins: exit_orig_ins_ptr,

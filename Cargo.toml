@@ -2,6 +2,7 @@
 authors = ["Markus Heikkinen <ittevien@gmail.com>"]
 name = "whack"
 version = "0.2.0"
+edition = "2021"
 
 [dependencies]
 byteorder = { version = "1.2", default-features = false }

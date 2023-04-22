@@ -13,8 +13,8 @@ use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::memoryapi::{VirtualProtect, VirtualQuery};
 use winapi::um::winnt::{self, HANDLE};
 
-use Export;
-use pe;
+use crate::Export;
+use crate::pe;
 
 pub type LibraryHandle = HMODULE;
 pub type LibraryName = Vec<u16>;

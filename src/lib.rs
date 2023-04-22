@@ -33,7 +33,7 @@ mod patch_map;
 
 type InitFn = unsafe fn(usize, &mut platform::ExecutableHeap);
 
-pub use macros::{
+pub use crate::macros::{
     AddressHook, AddressHookClosure, ExportHook, ExportHookClosure, HookDecl, HookDeclClosure
 };
 
@@ -47,12 +47,12 @@ use std::os::raw::c_void;
 
 use smallvec::SmallVec;
 
-use patch_map::PatchMap;
+use crate::patch_map::PatchMap;
 
 struct ImportHook {
     library: Cow<'static, [u8]>,
     export: Export<'static>,
-    wrapper_code: ::platform::HookWrapCode,
+    wrapper_code: crate::platform::HookWrapCode,
     // This keeps the hook target alive as long as the hook exists.
     #[allow(dead_code)]
     wrapper_target: Box<[u8]>,
@@ -174,7 +174,7 @@ enum HookType {
 }
 
 
-pub use platform::Location as Arg;
+pub use crate::platform::Location as Arg;
 
 /// Defines entry, exit, and argument locations for inline hooking (`ModulePatcher::inline_hook`).
 pub struct InlineHook {
