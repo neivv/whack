@@ -1,10 +1,8 @@
 #![cfg_attr(feature = "cargo-clippy", allow(fn_to_numeric_cast))]
 
-use std::cell::RefCell;
 use std::mem;
 use std::ptr;
 use std::slice;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lde;
 use byteorder::{ByteOrder, LE};
@@ -16,11 +14,6 @@ use crate::{OrigFuncCallback, GeneratedHook};
 
 pub use crate::win_common::*;
 
-// hack for rustc const eval false errors
-fn cast_fnptr_usize(x: usize) -> u32 {
-    x as u32
-}
-
 const JUMP_INS_LEN: usize = 6;
 #[inline]
 pub unsafe fn write_jump_to_ptr(from: *mut u8, to_ptr: *const *const u8) {
@@ -29,72 +22,6 @@ pub unsafe fn write_jump_to_ptr(from: *mut u8, to_ptr: *const *const u8) {
     *from = 0xff;
     *from.add(1) = 0x25;
     (from.add(2) as *mut u32).write_unaligned(to_ptr as u32);
-}
-
-#[repr(C)]
-pub struct InlineCallCtx {
-    stack_copy_size: usize,
-    regs: [usize; 8],
-}
-
-impl InlineCallCtx {
-    pub fn init_stack_copy_size(&mut self) {
-        let ebp = self.regs[2];
-        let esp = self.regs[3];
-        let val = ebp.wrapping_sub(esp).wrapping_add(8) & !0xf;
-        self.stack_copy_size = if val > 0x20 && val < 0x2000 {
-            val
-        } else {
-            0x200
-        };
-    }
-}
-
-thread_local! {
-    static TLS: RefCell<Vec<Vec<*const InlineCallCtx>>> = RefCell::new(Vec::new());
-}
-
-fn new_inline_tls_id() -> usize {
-    static TLS_IDS: AtomicUsize = AtomicUsize::new(0);
-    TLS_IDS.fetch_add(1, Ordering::SeqCst)
-}
-
-extern fn get_inline_tls(id: usize) -> *const InlineCallCtx {
-    TLS.with(|x| {
-        let val = x.borrow();
-        let ptr = val[id].last().cloned();
-        ptr.unwrap_or_else(|| ptr::null())
-    })
-}
-
-extern fn set_inline_tls(ctx: *const InlineCallCtx, id: usize) {
-    TLS.with(|x| {
-        let mut val = x.borrow_mut();
-        while val.len() <= id {
-            val.push(Vec::new());
-        }
-        (val)[id].push(ctx);
-    });
-}
-
-extern fn inline_tls_push_disable(id: usize) {
-    set_inline_tls(ptr::null(), id);
-}
-
-extern fn inline_tls_pop_enabled(id: usize) {
-    TLS.with(|x| {
-        let mut val = x.borrow_mut();
-        let prev = val[id].pop().unwrap();
-        assert!(!prev.is_null());
-    });
-}
-
-extern fn inline_tls_pop_disable(id: usize) {
-    TLS.with(|x| {
-        let mut val = x.borrow_mut();
-        let prev = val[id].pop().unwrap();
-        assert!(prev.is_null());
-    });
 }
 
 fn is_preserved_reg(reg: u8) -> bool {
@@ -172,12 +99,6 @@ impl AsmValue {
     }
 }
 
-struct InlineTlsValues {
-    tls_id: u32,
-    set_inline_tls: u32,
-    inline_tls_pop_enabled: u32,
-}
-
 impl HookWrapAssembler {
     pub fn new(rust_in_wrapper: *const u8, target: *const u8, stdcall: bool) -> HookWrapAssembler
     {
@@ -197,12 +118,7 @@ impl HookWrapAssembler {
     /// Returns the buffer and possible offset for fixup original ptr for import hooks.
     pub fn generate_wrapper_code(&self, orig: OrigFuncCallback) -> HookWrapCode {
         let mut buffer = AssemblerBuf::new();
-        let dummy = InlineTlsValues {
-            tls_id: 0,
-            set_inline_tls: 0,
-            inline_tls_pop_enabled: 0,
-        };
-        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, &dummy, orig);
+        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, orig);
         // Only write out wrappers when needed
         let delayed_out = match orig {
             OrigFuncCallback::Overwritten(orig) => {
@@ -212,8 +128,7 @@ impl HookWrapAssembler {
                 self.write_out_wrapper(&mut buffer, out_wrapper_pos, None)
             }
             OrigFuncCallback::None |
-                OrigFuncCallback::Hook(_) |
-                OrigFuncCallback::Inline(..) =>
+                OrigFuncCallback::Hook(_) =>
             {
                 !0
             }
@@ -221,43 +136,6 @@ impl HookWrapAssembler {
         HookWrapCode {
             buf: buffer,
             import_fixup_offset: delayed_out,
-            exit_wrapper_offset: 0,
-            parent_hook_offset: 0,
-        }
-    }
-
-    /// Returns the buffer and possible offset for fixup original ptr for import hooks.
-    ///
-    /// For inline hooks. Separate so that it won't get complied in if inline hooks
-    /// aren't used.
-    pub fn generate_wrapper_code_inline(
-        &self,
-        entry: *const u8,
-        exit: *const u8,
-        parent: *const u8,
-    ) -> HookWrapCode {
-        let mut buffer = AssemblerBuf::new();
-        let orig = OrigFuncCallback::Inline(entry, exit, parent);
-        let tls_values = InlineTlsValues {
-            tls_id: new_inline_tls_id() as u32,
-            set_inline_tls: cast_fnptr_usize(set_inline_tls as usize),
-            inline_tls_pop_enabled: cast_fnptr_usize(inline_tls_pop_enabled as usize),
-        };
-        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, &tls_values, orig);
-        let mut parent_hook_offset = 0;
-
-        self.write_inline_out_wrapper(&mut buffer, out_wrapper_pos, entry);
-        let exit_wrapper_offset = buffer.len();
-        self.write_inline_exit_hook(&mut buffer, tls_values.tls_id, exit);
-        if !parent.is_null() {
-            parent_hook_offset = buffer.len();
-            self.write_inline_parent_hook(&mut buffer, tls_values.tls_id, parent);
-        }
-        HookWrapCode {
-            buf: buffer,
-            import_fixup_offset: !0,
-            exit_wrapper_offset,
-            parent_hook_offset,
         }
     }
 
@@ -265,23 +143,11 @@ impl HookWrapAssembler {
     fn write_in_wrapper(
         &self,
         buffer: &mut AssemblerBuf,
-        // Dummy values if no inline
-        inline_tls: &InlineTlsValues,
         orig: OrigFuncCallback,
     ) -> AsmFixupPos {
         match orig {
             OrigFuncCallback::Hook(_) => {
                 buffer.pushad();
-            }
-            OrigFuncCallback::Inline(..) => {
-                buffer.pushad();
-                // It'll also alloc space for InlineCallCtx::stack_copy_size with this push
-                buffer.push(AsmValue::Constant(inline_tls.tls_id));
-                buffer.push(AsmValue::Register(4));
-                buffer.call(AsmValue::Constant(inline_tls.set_inline_tls));
-                buffer.stack_add(8);
-                buffer.popad();
-                buffer.stack_sub(0x28);
             }
             _ => (),
         }
@@ -292,11 +158,7 @@ impl HookWrapAssembler {
             buffer.push(AsmValue::from_loc(val));
         }
         buffer.call(AsmValue::Constant(self.rust_in_wrapper as u32));
-        if let OrigFuncCallback::Inline(..) = orig {
-            buffer.stack_add((self.args.len() + 3) * 4);
-        } else {
-            buffer.stack_add((self.args.len() + 2) * 4);
-        }
+        buffer.stack_add((self.args.len() + 2) * 4);
         match orig {
             OrigFuncCallback::Hook(orig) => {
                 buffer.popad();
@@ -304,19 +166,6 @@ impl HookWrapAssembler {
                     let len = copy_instruction_length(orig, JUMP_INS_LEN);
                     buffer.copy_instructions(orig, len);
                     buffer.jump(AsmValue::Constant(orig as u32 + len as u32));
-                }
-            }
-            OrigFuncCallback::Inline(_, exit, _) => {
-                buffer.push(AsmValue::Constant(inline_tls.tls_id));
-                buffer.call(
-                    AsmValue::Constant(inline_tls.inline_tls_pop_enabled)
-                );
-                buffer.stack_add(8);
-                buffer.popad();
-                unsafe {
-                    let len = copy_instruction_length(exit, JUMP_INS_LEN);
-                    buffer.copy_instructions(exit, len);
-                    buffer.jump(AsmValue::Constant(exit as u32 + len as u32));
                 }
             }
             _ => {
@@ -331,167 +180,6 @@ impl HookWrapAssembler {
             }
         }
         out_wrapper_pos
-    }
-
-    fn write_inline_out_wrapper(
-        &self,
-        buffer: &mut AssemblerBuf,
-        out_wrapper_pos: AsmFixupPos,
-        entry: *const u8,
-    ) {
-        buffer.reset_stack_offset();
-        buffer.fixup_to_position(out_wrapper_pos);
-        buffer.push(AsmValue::Register(3));
-        buffer.push(AsmValue::Register(5));
-        buffer.push(AsmValue::Register(6));
-        buffer.push(AsmValue::Register(7));
-        buffer.mov(AsmValue::Register(0), AsmValue::Stack(0));
-        buffer.mov(AsmValue::Register(1), AsmValue::EaxPtr(0));
-        buffer.stack_sub_reg(1);
-        let pushad_offset = 0x4;
-        buffer.mov(AsmValue::Register(6), AsmValue::EaxPtr(pushad_offset  + 0xc));
-        buffer.mov(AsmValue::Register(7), AsmValue::Register(4));
-        buffer.buf.extend_from_slice(&[0xf3, 0xa4]);
-
-        let mut stack_args: SmallVec<[_; 8]> = self.args
-            .iter()
-            .enumerate()
-            .filter_map(|(pos, x)| x.stack_to_opt().map(|x| (pos, x)))
-            .collect();
-
-        insertion_sort::sort_by_key(&mut stack_args, |&(_, target_pos)| target_pos);
-        let stack_off = (1u8..8).filter(|&x| x != 4)
-            .find(|&reg| !self.args.iter().filter_map(|x| x.reg_to_opt()).any(|x| x == reg))
-            .expect("No free reg");
-        let second_scratch = match stack_off {
-            2 => 1,
-            _ => 2,
-        };
-        buffer.mov(AsmValue::Register(stack_off), AsmValue::EaxPtr(0));
-        for (in_pos, out_pos) in stack_args {
-            buffer.mov_reg_offset(
-                AsmValue::Register(second_scratch),
-                AsmValue::Stack(in_pos as i16 + 1),
-                stack_off,
-            );
-            // Mov [esp + out_pos * 4], edx
-            buffer.buf.extend_from_slice(
-                &[0x89, 0x44 + second_scratch * 8, 0xe4, out_pos as u8 * 4 + 4]
-            );
-        }
-
-        for reg in (1u8..8).filter(|&x| x != 4 && x != stack_off) {
-            buffer.mov(
-                AsmValue::Register(reg),
-                AsmValue::EaxPtr(pushad_offset + 0x1c - i16::from(reg) * 4),
-            );
-        }
-        let reg_args = self.args
-            .iter()
-            .enumerate()
-            .filter_map(|(pos, x)| x.reg_to_opt().map(|x| (pos, x)));
-        buffer.push(AsmValue::Register(0));
-        for (pos, reg) in reg_args {
-            buffer.mov_reg_offset(
-                AsmValue::Register(reg),
-                AsmValue::Stack(pos as i16 + 1),
-                stack_off
-            );
-        }
-        // Restore the stack_off register, can't use EaxPtr if it was overwritten already.
-        // mov stack_off, [stack_off + offset]
-        buffer.pop(AsmValue::Register(stack_off));
-        buffer.buf.extend_from_slice(
-            &[0x8b, 0x40 + 9 * stack_off, pushad_offset as u8 + 0x1c - stack_off * 4]
-        );
-        if !self.args.iter().any(|&x| x == Location::Register(0)) {
-            buffer.mov(AsmValue::Register(0), AsmValue::EaxPtr(pushad_offset + 0x1c));
-        }
-        unsafe {
-            let len = copy_instruction_length(entry, JUMP_INS_LEN);
-            buffer.copy_instructions(entry, len);
-            buffer.jump(AsmValue::Constant(entry as u32 + len as u32));
-        }
-    }
-
-    fn write_inline_exit_hook(
-        &self,
-        buffer: &mut AssemblerBuf,
-        tls_id: u32,
-        exit: *const u8,
-    ) {
-        buffer.reset_stack_offset();
-        buffer.pushfd();
-        buffer.push(AsmValue::Register(0));
-        buffer.push(AsmValue::Register(1));
-        buffer.push(AsmValue::Register(2));
-        buffer.push(AsmValue::Constant(tls_id));
-        buffer.call(AsmValue::Constant(cast_fnptr_usize(get_inline_tls as usize)));
-        buffer.pop(AsmValue::Register(1));
-        // Doing rest like this due to the jump
-        buffer.buf.extend_from_slice(&[
-            0x85, 0xc0,
-            0x74, 0x0c,
-            0x8b, 0x08,
-            0x83, 0xc4, 0x10,
-            0x01, 0xcc,
-            0x5f,
-            0x5e,
-            0x5d,
-            0x5b,
-            0xc3,
-            // was_not_returing_from_orig
-            0x5a,
-            0x59,
-            0x58,
-            0x9d,
-        ]);
-        unsafe {
-            let len = copy_instruction_length(exit, JUMP_INS_LEN);
-            buffer.copy_instructions(exit, len);
-            buffer.jump(AsmValue::Constant(exit as u32 + len as u32));
-        }
-    }
-
-    fn write_inline_parent_hook(
-        &self,
-        buffer: &mut AssemblerBuf,
-        tls_id: u32,
-        parent: *const u8,
-    ) {
-        buffer.reset_stack_offset();
-        // Hooks the parent entry, calling pushing a "disable" to TLS stack on entry
-        // and popping on exit.
-        buffer.pushad();
-        buffer.push(AsmValue::Constant(tls_id));
-        buffer.call(AsmValue::Constant(cast_fnptr_usize(inline_tls_push_disable as usize)));
-        buffer.pop(AsmValue::Register(0));
-        buffer.popad();
-        for i in (0..12).rev() {
-            buffer.push(AsmValue::Stack(i))
-        }
-        let return_addr = buffer.fixup_position();
-        buffer.push(AsmValue::Undecided);
-        unsafe {
-            let len = copy_instruction_length(parent, JUMP_INS_LEN);
-            buffer.copy_instructions(parent, len);
-            buffer.jump(AsmValue::Constant(parent as u32 + len as u32));
-        }
-        buffer.fixup_to_position(return_addr);
-        buffer.pushad();
-        buffer.push(AsmValue::Constant(tls_id));
-        buffer.call(AsmValue::Constant(cast_fnptr_usize(inline_tls_pop_disable as usize)));
-        buffer.pop(AsmValue::Register(0));
-        buffer.popad();
-        buffer.stack_add(12 * 4);
-        if self.stdcall {
-            let stack_arg_count = self.args.iter()
-                .filter_map(|x| x.stack_to_opt())
-                .count();
-            buffer.ret(stack_arg_count * 4);
-        } else {
-            buffer.ret(0);
-        }
     }
 
     // Returns offset to fix delayed out address
@@ -645,9 +333,6 @@ impl FuncAssembler {
 pub struct HookWrapCode {
     buf: AssemblerBuf,
     import_fixup_offset: usize,
-    // If buf has an exit hook for inlined hooks as well, this is the offset to it.
-    exit_wrapper_offset: usize,
-    parent_hook_offset: usize,
 }
 
 impl HookWrapCode {
@@ -661,38 +346,25 @@ impl HookWrapCode {
     /// relative jumps don't work with (rather rare use case of) aliasing view patching.
     /// The original instructions will be copied to memory right before the wrapper,
     /// to be used when patch is disabled.
-    ///
-    /// Also now returns exit hook for inline hooks.
     #[cfg_attr(feature = "cargo-clippy", allow(cast_ptr_alignment))]
     pub fn write_wrapper(
         &self,
         entry: Option<*const u8>,
-        exit: Option<*const u8>,
-        inline_parent_entry: Option<*const u8>,
         heap: &mut ExecutableHeap,
         import_fixup: Option<*const u8>,
-    ) -> (GeneratedHook, Option<GeneratedHook>, Option<GeneratedHook>) {
+    ) -> GeneratedHook {
         let ins_len = |x| { unsafe { copy_instruction_length(x, JUMP_INS_LEN) } };
 
         let entry_orig_ins_len = entry.map(&ins_len).unwrap_or(0);
-        let exit_orig_ins_len = exit.map(&ins_len).unwrap_or(0);
-        let parent_orig_ins_len = inline_parent_entry.map(&ins_len).unwrap_or(0);
 
         let wrapper_len =
             align(self.buf.len(), 4) +
             align(entry_orig_ins_len, 4) +
-            align(exit_orig_ins_len, 4) +
-            align(parent_orig_ins_len + 0xc, 4);
+            4; // + 4 for pointer_to_wrapper
         let data = heap.allocate(wrapper_len);
         let entry_orig_ins_ptr = data;
-        let exit_orig_ins_ptr = unsafe {
-            entry_orig_ins_ptr.offset(align(entry_orig_ins_len, 4) as isize)
-        };
-        let parent_orig_ins_ptr = unsafe {
-            exit_orig_ins_ptr.offset(align(exit_orig_ins_len, 4) as isize)
-        };
         let wrapper = unsafe {
-            parent_orig_ins_ptr.offset(align(parent_orig_ins_len, 4) as isize)
+            entry_orig_ins_ptr.add(align(entry_orig_ins_len, 4))
         };
         let wrapper_end = unsafe {
             wrapper.offset(align(self.buf.len(), 4) as isize)
@@ -700,14 +372,6 @@ impl HookWrapCode {
         if let Some(entry) = entry {
             unsafe { ptr::copy_nonoverlapping(entry, entry_orig_ins_ptr, entry_orig_ins_len) };
         }
-        if let Some(exit) = exit {
-            unsafe { ptr::copy_nonoverlapping(exit, exit_orig_ins_ptr, exit_orig_ins_len) };
-        }
-        if let Some(parent) = inline_parent_entry {
-            unsafe { ptr::copy_nonoverlapping(parent, parent_orig_ins_ptr, parent_orig_ins_len) };
-        }
-        let exit_wrapper = unsafe { wrapper.offset(self.exit_wrapper_offset as isize) };
-        let parent_hook = unsafe { wrapper.offset(self.parent_hook_offset as isize) };
         self.buf.write(wrapper);
         if let Some(fixup) = import_fixup {
             unsafe {
@@ -720,36 +384,14 @@ impl HookWrapCode {
             *ptr = wrapper;
             ptr
         };
-        let exit_pointer_to_wrapper = unsafe {
-            let ptr = wrapper_end.offset(4) as *mut *const u8;
-            *ptr = exit_wrapper;
-            ptr
-        };
-        let parent_pointer_to_wrapper = unsafe {
-            let ptr = wrapper_end.offset(8) as *mut *const u8;
-            *ptr = parent_hook;
-            ptr
-        };
-        assert_eq!(parent_pointer_to_wrapper as usize + 4, data as usize + wrapper_len);
+        assert_eq!(entry_pointer_to_wrapper as usize + 4, data as usize + wrapper_len);
         let entry = GeneratedHook {
             wrapper,
             orig_ins_len: entry_orig_ins_len,
             orig_ins: entry_orig_ins_ptr,
             pointer_to_wrapper: entry_pointer_to_wrapper,
         };
-        let exit = exit.map(|_| GeneratedHook {
-            wrapper: exit_wrapper,
-            orig_ins_len: exit_orig_ins_len,
-            orig_ins: exit_orig_ins_ptr,
-            pointer_to_wrapper: exit_pointer_to_wrapper,
-        });
-        let parent = inline_parent_entry.map(|_| GeneratedHook {
-            wrapper: parent_hook,
-            orig_ins_len: parent_orig_ins_len,
-            orig_ins: parent_orig_ins_ptr,
-            pointer_to_wrapper: parent_pointer_to_wrapper,
-        });
-        (entry, exit, parent)
+        entry
     }
 }
 
@@ -807,10 +449,6 @@ impl AssemblerBuf {
                 write_unaligned(out.offset(fixup as isize), prev.wrapping_add(diff as u32));
             }
         }
-    }
-
-    pub fn pushfd(&mut self) {
-        self.buf.push(0x9c);
     }
 
     pub fn push(&mut self, val: AsmValue) {
@@ -896,29 +534,6 @@ impl AssemblerBuf {
         }
     }
 
-    pub fn mov_reg_offset(&mut self, to: AsmValue, from: AsmValue, reg: u8) {
-        match (to, from) {
-            (AsmValue::Register(to), AsmValue::Stack(from)) => {
-                let offset = (i32::from(from) * 4) + 4 + self.stack_offset;
-                match offset {
-                    0 => {
-                        self.buf.extend_from_slice(&[0x8b, 0x4 + to * 8, 0x04 + reg * 8]);
-                    }
-                    x if x < 0x80 => {
-                        self.buf.extend_from_slice(
-                            &[0x8b, 0x44 + to * 8, 0x04 + reg * 8, x as u8],
-                        );
-                    }
-                    x => {
-                        self.buf.extend_from_slice(&[0x8b, 0x84 + to * 8, 0x04 + reg * 8]);
-                        self.buf.extend_from_slice(&(x as u32).to_le_bytes());
-                    }
-                }
-            }
-            (_, _) => unimplemented!(),
-        }
-    }
-
     fn stack_add_sub(&mut self, value: usize, add: bool) {
         let byte2;
         if add {
@@ -946,11 +561,6 @@ impl AssemblerBuf {
 
     pub fn stack_sub(&mut self, value: usize) {
         self.stack_add_sub(value, false)
-    }
-
-    // NOTE: WONT UPDATE STACK OFFSET BECAUSE IT CANT
-    pub fn stack_sub_reg(&mut self, register: u8) {
-        self.buf.extend_from_slice(&[0x29, 0xc4 + register * 8]);
     }
 
     pub fn ret(&mut self, stack_pop: usize) {

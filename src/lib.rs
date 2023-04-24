@@ -90,9 +90,6 @@ struct HookPatch {
     #[allow(dead_code)]
     wrapper_target: Box<[u8]>,
     entry: Option<GeneratedHook>,
-    // For inline hooks.
-    exit: Option<GeneratedHook>,
-    inline_parent_entry: Option<GeneratedHook>,
     // Is this a replacing hook or just a detour
     ty: HookType,
 }
@@ -151,9 +148,6 @@ pub enum OrigFuncCallback {
     Overwritten(*const u8),
     // Calls original function afterwards.
     Hook(*const u8),
-    // Inline hook, technically superset of Overwritten and Hook, but has a TLS cost.
-    // (entry, exit, uninlined_func_entry)
-    Inline(*const u8, *const u8, *const u8),
     // For import hooks, allows setting the value once the library is actually loaded.
     ImportHook,
 }
@@ -166,27 +160,10 @@ enum HookType {
     // Allows hooking at any point without disrupting the function state
     // Grouped with OrigFuncCallback::Hook and ModulePatcher::call_hook.
     InlineNoOrig(usize),
-    // Allows hooking at any point without disrupting the function state,
-    // and calling the original function, but uses TLS to track recursion.
-    // Grouped with OrigFuncCallback::Inline and ModulePatcher::inline_hook.
-    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
-    Inline(usize, usize, usize),
 }
 
 
 pub use crate::platform::Location as Arg;
-
-/// Defines entry, exit, and argument locations for inline hooking (`ModulePatcher::inline_hook`).
-pub struct InlineHook {
-    pub entry: usize,
-    pub exit: usize,
-    /// The entry to the function which contains the inlined function.
-    /// Can be left 0, but may cause issues if the hooked function recurses.
-    pub inline_parent_entry: usize,
-    /// Registers/stack locations of the arguments, ordered to match hook declaration.
-    /// Having two arguments equal to each other is not allowed.
-    pub args: Vec<Arg>,
-}
 
 /// A 'handle' to a patch. Allows disabling/re-enabling it at will.
 /// Also allows to permamently delete the patch, which may free a bit
@@ -219,11 +196,7 @@ impl ModulePatch {
         }
         match self.variant {
             ModulePatchType::Hook(ref mut hook) => {
-                if let HookType::Inline(..) = hook.ty {
-                    hook.apply_inline(handles, heap)
-                } else {
-                    hook.apply_no_inline(handles, heap)
-                }
+                hook.apply(handles, heap)
             }
             ModulePatchType::Data(ref mut patch) => {
                 patch.apply(handles);
@@ -240,18 +213,11 @@ impl ModulePatch {
             if let Some(handle) = handle {
                 match self.variant {
                     ModulePatchType::Hook(ref mut hook) => {
-                        let (entry, exit, parent) = match hook.ty {
-                            HookType::Entry(a) | HookType::InlineNoOrig(a) => (a, !0, !0),
-                            HookType::Inline(a, e, p) => (a, e, p),
+                        let entry = match hook.ty {
+                            HookType::Entry(a) | HookType::InlineNoOrig(a) => a,
                         };
                         if let Some(ref e) = hook.entry {
                             e.revert((handle as usize + entry) as *mut u8);
-                        }
-                        if let Some(ref e) = hook.exit {
-                            e.revert((handle as usize + exit) as *mut u8);
-                        }
-                        if let Some(ref e) = hook.inline_parent_entry {
-                            e.revert((handle as usize + parent) as *mut u8);
                         }
                     }
                     ModulePatchType::Data(ReplacingPatch { ref backup_buf, address, .. }) => {
@@ -273,7 +239,7 @@ impl ModulePatch {
 
 impl HookPatch {
     /// Applies an non-inline hook.
-    pub unsafe fn apply_no_inline(
+    pub unsafe fn apply(
         &mut self,
         handles: &PatchEnableHandles,
         heap: &mut platform::ExecutableHeap,
@@ -282,72 +248,18 @@ impl HookPatch {
         let to_abs = |relative: usize| (base + relative) as *const u8;
         let entry = match self.ty {
             HookType::Entry(a) | HookType::InlineNoOrig(a) => a,
-            HookType::Inline(..) => return,
         };
         if self.entry.is_none() {
             let orig = match self.ty {
                 HookType::Entry(a) => OrigFuncCallback::Overwritten(to_abs(a)),
                 HookType::InlineNoOrig(a) => OrigFuncCallback::Hook(to_abs(a)),
-                HookType::Inline(..) => return,
             };
             let code = self.wrapper_code.generate_wrapper_code(orig);
-            let (entry, _, _) = code.write_wrapper(
-                Some(to_abs(entry)),
-                None,
-                None,
-                heap,
-                None,
-            );
+            let entry = code.write_wrapper(Some(to_abs(entry)), heap, None);
             self.entry = Some(entry);
         }
         if let Some(ref hook) = self.entry {
             let write_address = (handles.write as usize + entry) as *mut u8;
-            platform::write_jump_to_ptr(write_address, hook.pointer_to_wrapper);
-        }
-    }
-
-    /// Applies an inline hook.
-    pub unsafe fn apply_inline(
-        &mut self,
-        handles: &PatchEnableHandles,
-        heap: &mut platform::ExecutableHeap,
-    ) {
-        let base = handles.exec as usize;
-        let to_abs = |relative: usize| (base + relative) as *const u8;
-        let (entry, exit, inline_parent_entry) = match self.ty {
-            HookType::Inline(entry, exit, parent) => (entry, exit, parent),
-            _ => return,
-        };
-        if self.entry.is_none() {
-            let (a, b, c) = match self.ty {
-                HookType::Inline(a, e, p) => (to_abs(a), to_abs(e), to_abs(p)),
-                _ => return,
-            };
-            let code = self.wrapper_code.generate_wrapper_code_inline(a, b, c);
-            let (entry, exit, parent) = code.write_wrapper(
-                Some(to_abs(entry)),
-                Some(to_abs(exit)),
-                match inline_parent_entry != 0 {
-                    true => Some(to_abs(inline_parent_entry)),
-                    false => None,
-                },
-                heap,
-                None,
-            );
-            self.entry = Some(entry);
-            self.exit = exit;
-            self.inline_parent_entry = parent;
-        }
-        if let Some(ref hook) = self.entry {
-            let write_address = (handles.write as usize + entry) as *mut u8;
-            platform::write_jump_to_ptr(write_address, hook.pointer_to_wrapper);
-        }
-        if let Some(ref hook) = self.exit {
-            let write_address = (handles.write as usize + exit) as *mut u8;
-            platform::write_jump_to_ptr(write_address, hook.pointer_to_wrapper);
-        }
-        if let Some(ref hook) = self.inline_parent_entry {
-            let write_address = (handles.write as usize + inline_parent_entry) as *mut u8;
             platform::write_jump_to_ptr(write_address, hook.pointer_to_wrapper);
         }
     }
@@ -372,8 +284,7 @@ impl ImportHook {
         if let Some(addr) = addr {
             if self.stored_wrapper.is_null() {
                 let out_ptr = Some(*addr as *const u8);
-                let (entry, _, _) =
-                    self.wrapper_code.write_wrapper(None, None, None, heap, out_ptr);
+                let entry = self.wrapper_code.write_wrapper(None, heap, out_ptr);
                 self.stored_wrapper = entry.wrapper;
             }
             self.orig = *addr as *const u8;
@@ -726,17 +637,10 @@ impl<'b> ModulePatcher<'b> {
     where H: AddressHookClosure<T> {
         let target = H::write_target_objects(target);
         let assembler = H::wrapper_assembler(target.as_ptr());
-        match ty {
-            HookType::Entry(..) | HookType::InlineNoOrig(..) => {
-                self.add_noninline_hook(ty, target, assembler)
-            }
-            HookType::Inline(entry, exit, parent) => {
-                self.add_inline_hook(entry, exit, parent, target, assembler)
-            }
-        }
+        self.add_hook_nongeneric(ty, target, assembler)
     }
 
-    unsafe fn add_noninline_hook(
+    unsafe fn add_hook_nongeneric(
         &mut self,
         ty: HookType,
         target: Box<[u8]>,
@@ -746,41 +650,10 @@ impl<'b> ModulePatcher<'b> {
             wrapper_code: wrapper_assembler,
             wrapper_target: target,
             entry: None,
-            exit: None,
-            inline_parent_entry: None,
             ty,
         });
         if let Some(ref handles) = self.patch_enable_handles {
-            variant.apply_no_inline(handles, &mut self.parent.exec_heap);
-        }
-        let patch = ModulePatch {
-            variant: ModulePatchType::Hook(variant),
-            image_base: self.image_base.clone(),
-            active: self.patch_enable_handles.is_some(),
-        };
-        let key = self.parent.patches.insert(patch);
-        self.patches.push(key.clone());
-        Patch(PatchEnum::Regular(key))
-    }
-
-    unsafe fn add_inline_hook(
-        &mut self,
-        entry: usize,
-        exit: usize,
-        parent: usize,
-        target: Box<[u8]>,
-        wrapper_assembler: platform::HookWrapAssembler,
-    ) -> Patch {
-        let mut variant = Box::new(HookPatch {
-            wrapper_code: wrapper_assembler,
-            wrapper_target: target,
-            entry: None,
-            exit: None,
-            inline_parent_entry: None,
-            ty: HookType::Inline(entry, exit, parent),
-        });
-        if let Some(ref handles) = self.patch_enable_handles {
-            variant.apply_inline(handles, &mut self.parent.exec_heap);
+            variant.apply(handles, &mut self.parent.exec_heap);
         }
         let patch = ModulePatch {
             variant: ModulePatchType::Hook(variant),
@@ -962,22 +835,6 @@ impl<'b> ModulePatcher<'b> {
     pub fn exec_alloc(&mut self, size: usize) -> &'static mut [u8] {
         let mem = self.parent.exec_heap.allocate(size);
         unsafe { ::std::slice::from_raw_parts_mut(mem, size) }
-    }
-
-    /// Hooks a function with explicit entry, exit, and dynamic args.
-    ///
-    /// That is, this is supposed to work in cases where a function is inline of another
-    /// function.
-    #[cfg(target_arch = "x86")]
-    pub unsafe fn inline_hook<H, T>(&mut self, _hook: H, decl: &InlineHook, target: T) -> Patch
-    where H: HookDeclClosure<T>
-    {
-        let target = H::write_target_objects(target);
-        let mut assembler = H::wrapper_assembler_inline(target.as_ptr());
-        for &arg in &decl.args {
-            assembler.add_arg(arg);
-        }
-        self.add_inline_hook(decl.entry, decl.exit, decl.inline_parent_entry, target, assembler)
     }
 }
 
