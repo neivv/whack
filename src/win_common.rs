@@ -8,10 +8,9 @@ use std::ptr;
 
 use winapi::shared::minwindef::HMODULE;
 use winapi::um::errhandlingapi::GetLastError;
-use winapi::um::heapapi::{HeapAlloc, HeapCreate, HeapFree};
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::memoryapi::{VirtualProtect, VirtualQuery};
-use winapi::um::winnt::{self, HANDLE};
+use winapi::um::winnt::{self};
 
 use crate::Export;
 use crate::pe;
@@ -43,32 +42,6 @@ fn winapi_str<T: AsRef<OsStr>>(input: T) -> Vec<u16> {
     out.extend(iter);
     out.push(0);
     out
-}
-
-pub struct ExecutableHeap {
-    handle: HANDLE,
-}
-
-unsafe impl Send for ExecutableHeap {
-}
-
-impl ExecutableHeap {
-    pub const fn new() -> ExecutableHeap {
-        ExecutableHeap {
-            handle: 0 as HANDLE,
-        }
-    }
-
-    pub fn allocate(&mut self, size: usize) -> *mut u8 {
-        if self.handle.is_null() {
-            self.handle = unsafe { HeapCreate(winnt::HEAP_CREATE_ENABLE_EXECUTE, 0, 0) };
-        }
-        unsafe { HeapAlloc(self.handle, 0, size) as *mut u8 }
-    }
-
-    pub fn free(&mut self, ptr: *mut u8) {
-        unsafe { HeapFree(self.handle, 0, ptr as *mut _); }
-    }
 }
 
 pub fn exe_handle() -> HMODULE {

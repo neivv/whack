@@ -7,6 +7,8 @@ use std::slice;
 use lde;
 use byteorder::{ByteOrder, LE};
 use smallvec::SmallVec;
+use winapi::um::heapapi::{HeapAlloc, HeapCreate};
+use winapi::um::winnt::{self, HANDLE};
 
 use crate::helpers::*;
 use crate::insertion_sort;
@@ -22,6 +24,33 @@ pub unsafe fn write_jump_to_ptr(from: *mut u8, to_ptr: *const *const u8) {
     *from = 0xff;
     *from.add(1) = 0x25;
     (from.add(2) as *mut u32).write_unaligned(to_ptr as u32);
+}
+
+pub struct ExecutableHeap {
+    handle: HANDLE,
+}
+
+unsafe impl Send for ExecutableHeap {
+}
+
+impl ExecutableHeap {
+    pub const fn new() -> ExecutableHeap {
+        ExecutableHeap {
+            handle: 0 as HANDLE,
+        }
+    }
+
+    pub fn allocate(&mut self, size: usize) -> *mut u8 {
+        if self.handle.is_null() {
+            self.handle = unsafe { HeapCreate(winnt::HEAP_CREATE_ENABLE_EXECUTE, 0, 0) };
+        }
+        unsafe { HeapAlloc(self.handle, 0, size) as *mut u8 }
+    }
+}
+
+struct PopParams {
+    stack_pop_size: usize,
+    preserved_regs: u8,
 }
 
 fn is_preserved_reg(reg: u8) -> bool {
@@ -115,27 +144,38 @@ impl HookWrapAssembler {
         self.args.push(arg);
     }
 
-    /// Returns the buffer and possible offset for fixup original ptr for import hooks.
-    pub fn generate_wrapper_code(&self, orig: OrigFuncCallback) -> HookWrapCode {
+    pub fn generate_and_write_wrapper(
+        &self,
+        orig: OrigFuncCallback,
+        entry: Option<*const u8>,
+        heap: &mut ExecutableHeap,
+    ) -> GeneratedHook {
         let mut buffer = AssemblerBuf::new();
-        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, orig);
-        // Only write out wrappers when needed
-        let delayed_out = match orig {
-            OrigFuncCallback::Overwritten(orig) => {
-                self.write_out_wrapper(&mut buffer, out_wrapper_pos, Some(orig))
-            }
-            OrigFuncCallback::ImportHook => {
-                self.write_out_wrapper(&mut buffer, out_wrapper_pos, None)
-            }
-            OrigFuncCallback::None |
-                OrigFuncCallback::Hook(_) =>
-            {
-                !0
-            }
+        let orig_ptr = match orig {
+            OrigFuncCallback::Hook(s) => Some(s),
+            _ => None,
         };
+        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, orig_ptr);
+        // Only write out wrappers when needed
+        if let OrigFuncCallback::Overwritten(orig) = orig {
+            self.write_hook_out_wrapper(&mut buffer, out_wrapper_pos, orig)
+        }
+        let code = HookWrapCode {
+            buf: buffer,
+            import_fixup_offset: 0,
+        };
+        code.write_wrapper(entry, heap, None)
+    }
+
+    pub fn generate_import_wrapper_code(&self) -> HookWrapCode {
+        let mut buffer = AssemblerBuf::new();
+
+        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, None);
+        let import_fixup_offset = self.write_import_out_wrapper(&mut buffer, out_wrapper_pos);
+
         HookWrapCode {
             buf: buffer,
-            import_fixup_offset: delayed_out,
+            import_fixup_offset,
         }
     }
 
@@ -143,13 +183,11 @@ impl HookWrapAssembler {
     fn write_in_wrapper(
         &self,
         buffer: &mut AssemblerBuf,
-        orig: OrigFuncCallback,
+        orig: Option<*const u8>,
     ) -> AsmFixupPos {
-        match orig {
-            OrigFuncCallback::Hook(_) => {
-                buffer.pushad();
-            }
-            _ => (),
+        let is_non_replacing_hook = orig.is_some();
+        if is_non_replacing_hook {
+            buffer.pushad();
         }
         buffer.push(AsmValue::Constant(self.target as u32));
         let out_wrapper_pos = buffer.fixup_position();
@@ -160,7 +198,7 @@ impl HookWrapAssembler {
         buffer.call(AsmValue::Constant(self.rust_in_wrapper as u32));
         buffer.stack_add((self.args.len() + 2) * 4);
         match orig {
-            OrigFuncCallback::Hook(orig) => {
+            Some(orig) => {
                 buffer.popad();
                 unsafe {
                     let len = copy_instruction_length(orig, JUMP_INS_LEN);
@@ -168,7 +206,7 @@ impl HookWrapAssembler {
                     buffer.jump(AsmValue::Constant(orig as u32 + len as u32));
                 }
             }
-            _ => {
+            None => {
                 if self.stdcall {
                     let stack_arg_count = self.args.iter()
                         .filter_map(|x| x.stack_to_opt())
@@ -182,14 +220,46 @@ impl HookWrapAssembler {
         out_wrapper_pos
     }
 
-    // Returns offset to fix delayed out address
-    fn write_out_wrapper(
+    fn write_hook_out_wrapper(
         &self,
         buffer: &mut AssemblerBuf,
         out_wrapper_pos: AsmFixupPos,
-        orig: Option<*const u8>,
+        orig: *const u8,
+    ) {
+        let result = self.write_out_wrapper_common(buffer, out_wrapper_pos);
+        // Push return address manually
+        unsafe {
+            let len = copy_instruction_length(orig, JUMP_INS_LEN);
+            let ret_address = buffer.fixup_position();
+            buffer.push(AsmValue::Undecided);
+            buffer.copy_instructions(orig, len);
+            buffer.jump(AsmValue::Constant(orig as u32 + len as u32));
+            buffer.fixup_to_position(ret_address);
+        }
+        self.write_out_wrapper_post_call(buffer, &result);
+    }
+
+    // Returns offset to fix delayed out address
+    fn write_import_out_wrapper(
+        &self,
+        buffer: &mut AssemblerBuf,
+        out_wrapper_pos: AsmFixupPos,
     ) -> usize {
-        let mut preserved_regs: SmallVec<[u8; 8]> = SmallVec::new();
+        let result = self.write_out_wrapper_common(buffer, out_wrapper_pos);
+        let delayed_out = buffer.call_const(!0);
+        self.write_out_wrapper_post_call(buffer, &result);
+        delayed_out
+    }
+
+    /// Writes out wrapper up to the point of the actual function call / orig instructions
+    /// After function call has been written, use write_out_wrapper_post_call with return
+    /// value of this function to finish.
+    fn write_out_wrapper_common(
+        &self,
+        buffer: &mut AssemblerBuf,
+        out_wrapper_pos: AsmFixupPos,
+    ) -> PopParams {
+        let mut preserved_regs = 0u8;
         buffer.reset_stack_offset();
         buffer.fixup_to_position(out_wrapper_pos);
         for (pos, val) in self.args
@@ -198,7 +268,7 @@ impl HookWrapAssembler {
                 .filter_map(|(pos, x)| x.reg_to_opt().map(|x| (pos, x))) {
             if is_preserved_reg(val) {
                 buffer.push(AsmValue::Register(val));
-                preserved_regs.push(val);
+                preserved_regs |= 1u8 << val;
             }
             buffer.mov(AsmValue::Register(val), AsmValue::Stack(pos as i16));
         }
@@ -228,28 +298,32 @@ impl HookWrapAssembler {
             buffer.stack_sub(s.1 as usize * 4);
         }
 
-        let delayed_out = if let Some(orig) = orig {
-            // Push return address manually
-            unsafe {
-                let len = copy_instruction_length(orig, JUMP_INS_LEN);
-                let ret_address = buffer.fixup_position();
-                buffer.push(AsmValue::Undecided);
-                buffer.copy_instructions(orig, len);
-                buffer.jump(AsmValue::Constant(orig as u32 + len as u32));
-                buffer.fixup_to_position(ret_address);
-            }
-            !0
+        let stack_pop_size = if self.stdcall {
+            0
         } else {
-            buffer.call_const(!0)
-        };
-        buffer.stack_add(if self.stdcall { 0 } else {
             stack_args.last().map(|x| (x.1 + 1) as usize * 4).unwrap_or(0)
-        });
-        for &preserved_reg in preserved_regs.iter().rev() {
-            buffer.pop(AsmValue::Register(preserved_reg));
+        };
+        PopParams {
+            stack_pop_size,
+            preserved_regs,
+        }
+    }
+
+    /// PopParams is generated by the pre call code (write_out_wrapper_common)
+    fn write_out_wrapper_post_call(
+        &self,
+        buffer: &mut AssemblerBuf,
+        params: &PopParams,
+    ) {
+        buffer.stack_add(params.stack_pop_size);
+        if params.preserved_regs != 0 {
+            for reg in 0..8 {
+                if params.preserved_regs & (1 << reg) != 0 {
+                    buffer.pop(AsmValue::Register(reg));
+                }
+            }
         }
         buffer.ret(0);
-        delayed_out
     }
 }
 
@@ -392,6 +466,14 @@ impl HookWrapCode {
             pointer_to_wrapper: entry_pointer_to_wrapper,
         };
         entry
+    }
+
+    pub fn write_import_wrapper(
+        &self,
+        heap: &mut ExecutableHeap,
+        import_fixup: *const u8,
+    ) -> GeneratedHook {
+        self.write_wrapper(None, heap, Some(import_fixup))
     }
 }
 

@@ -29,6 +29,8 @@ pub mod platform;
 
 mod helpers;
 mod insertion_sort;
+#[cfg(target_arch = "x86_64")]
+mod near_module_alloc;
 mod patch_map;
 
 type InitFn = unsafe fn(usize, &mut platform::ExecutableHeap);
@@ -79,6 +81,10 @@ struct ReplacingPatch {
 #[doc(hidden)]
 pub struct GeneratedHook {
     pub wrapper: *const u8,
+    /// Used for reverting the hook. Not related to the orig instruction
+    /// copy that is intended to be executed while hook is active.
+    /// Distinction being that this is just a memcpy without fixing
+    /// relative instructions.
     orig_ins: *const u8,
     orig_ins_len: usize,
     pointer_to_wrapper: *const *const u8,
@@ -148,8 +154,6 @@ pub enum OrigFuncCallback {
     Overwritten(*const u8),
     // Calls original function afterwards.
     Hook(*const u8),
-    // For import hooks, allows setting the value once the library is actually loaded.
-    ImportHook,
 }
 
 // All addresses are relative
@@ -254,8 +258,11 @@ impl HookPatch {
                 HookType::Entry(a) => OrigFuncCallback::Overwritten(to_abs(a)),
                 HookType::InlineNoOrig(a) => OrigFuncCallback::Hook(to_abs(a)),
             };
-            let code = self.wrapper_code.generate_wrapper_code(orig);
-            let entry = code.write_wrapper(Some(to_abs(entry)), heap, None);
+            let entry = self.wrapper_code.generate_and_write_wrapper(
+                orig,
+                Some(to_abs(entry)),
+                heap,
+            );
             self.entry = Some(entry);
         }
         if let Some(ref hook) = self.entry {
@@ -283,8 +290,8 @@ impl ImportHook {
         let addr = platform::import_addr(handles.write, &self.library, &self.export);
         if let Some(addr) = addr {
             if self.stored_wrapper.is_null() {
-                let out_ptr = Some(*addr as *const u8);
-                let entry = self.wrapper_code.write_wrapper(None, heap, out_ptr);
+                let out_ptr = *addr as *const u8;
+                let entry = self.wrapper_code.write_import_wrapper(heap, out_ptr);
                 self.stored_wrapper = entry.wrapper;
             }
             self.orig = *addr as *const u8;
@@ -782,7 +789,7 @@ impl<'b> ModulePatcher<'b> {
             library: library.into(),
             export: H::default_export(),
             wrapper_code: H::wrapper_assembler(wrapper_target.as_ptr())
-                .generate_wrapper_code(OrigFuncCallback::ImportHook),
+                .generate_import_wrapper_code(),
             wrapper_target,
             orig: ptr::null(),
             stored_wrapper: ptr::null(),

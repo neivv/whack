@@ -242,8 +242,11 @@ macro_rules! whack_addr_hook_common {
                     unsafe { (*Box::into_raw(data)).as_ptr() }
                 };
                 let entry = H::wrapper_assembler(target_closure)
-                    .generate_wrapper_code($crate::OrigFuncCallback::None)
-                    .write_wrapper(None, exec_heap, None);
+                    .generate_and_write_wrapper(
+                        $crate::OrigFuncCallback::None,
+                        None,
+                        exec_heap,
+                    );
                 entry.wrapper
             }
 

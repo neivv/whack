@@ -8,6 +8,7 @@ use smallvec::SmallVec;
 
 use crate::helpers::*;
 use crate::insertion_sort;
+use crate::near_module_alloc::NearModuleAllocator;
 use crate::{GeneratedHook, OrigFuncCallback};
 
 pub use crate::win_common::*;
@@ -22,6 +23,43 @@ pub unsafe fn write_jump_to_ptr(from: *mut u8, to_ptr: *const *const u8) {
     write_unaligned(from.offset(2), 0u32);
     write_unaligned(from.offset(6), *to_ptr);
 }
+
+pub struct ExecutableHeap {
+    allocators: Vec<NearModuleAllocator>,
+}
+
+impl ExecutableHeap {
+    pub const fn new() -> ExecutableHeap {
+        ExecutableHeap {
+            allocators: Vec::new(),
+        }
+    }
+
+    /// Function for just allocating some executable memory.
+    /// Not guaranteed to be near any specific module.
+    pub fn allocate(&mut self, size: usize) -> *mut u8 {
+        if self.allocators.is_empty() {
+            let exe_handle = exe_handle() as *const u8;
+            self.allocators.push(NearModuleAllocator::new(exe_handle));
+        }
+        self.allocators[0].allocate(size)
+    }
+
+    /// ptr is start,end range to which the returned allocation must be near.
+    pub fn allocate_near(&mut self, ptr: (*const u8, *const u8), size: usize) -> *mut u8 {
+        for alloc in &mut self.allocators {
+            if let Some(s) = alloc.allocate_near(ptr, size) {
+                return s.as_ptr();
+            }
+        }
+        let mut allocator = NearModuleAllocator::new(ptr.0);
+        let ret = allocator.allocate_near(ptr, size).expect("Failed to allocate");
+        self.allocators.push(allocator);
+        ret.as_ptr()
+    }
+}
+
+struct StackPopSize(usize);
 
 fn is_preserved_reg(reg: u8) -> bool {
     match reg {
@@ -130,85 +168,93 @@ impl HookWrapAssembler {
         self.args.push(arg);
     }
 
-    pub fn generate_wrapper_code(&self, orig: OrigFuncCallback) -> HookWrapCode {
+    pub fn generate_and_write_wrapper(
+        &self,
+        orig: OrigFuncCallback,
+        entry: Option<*const u8>,
+        heap: &mut ExecutableHeap,
+    ) -> GeneratedHook {
         let mut buffer = AssemblerBuf::new();
 
-        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, orig);
-        let import_fixup_offset = match orig {
-            OrigFuncCallback::Overwritten(orig) => {
-                self.write_out_wrapper(&mut buffer, out_wrapper_pos, Some(orig))
-            }
-            OrigFuncCallback::ImportHook => {
-                self.write_out_wrapper(&mut buffer, out_wrapper_pos, None)
-            }
-            OrigFuncCallback::None |
-                OrigFuncCallback::Hook(_) =>
-            {
-                None
-            }
+        let orig_ptr = match orig {
+            OrigFuncCallback::Hook(s) => Some(s),
+            _ => None,
         };
+        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, orig_ptr);
+        if let OrigFuncCallback::Overwritten(orig) = orig {
+            self.write_hook_out_wrapper(&mut buffer, out_wrapper_pos, orig);
+        }
+        buffer.align(16);
+        buffer.write_fixups();
+
+        let code = HookWrapCode {
+            buf: buffer,
+            import_fixup_offset: 0,
+        };
+        code.write_wrapper(entry, heap)
+    }
+
+    pub fn generate_import_wrapper_code(&self) -> HookWrapCode {
+        let mut buffer = AssemblerBuf::new();
+
+        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, None);
+        let import_fixup_offset = self.write_import_out_wrapper(&mut buffer, out_wrapper_pos);
         buffer.align(16);
         let const_offsets = buffer.write_fixups();
 
         HookWrapCode {
             buf: buffer,
-            import_fixup_offset: import_fixup_offset.map(|x| const_offsets.to_offset(x))
-                .unwrap_or(0),
+            import_fixup_offset: const_offsets.to_offset(import_fixup_offset),
         }
     }
 
-    fn write_in_wrapper(&self, buffer: &mut AssemblerBuf, orig: OrigFuncCallback) -> AsmFixupPos {
+    /// Orig should be set for call_hook only
+    fn write_in_wrapper(&self, buffer: &mut AssemblerBuf, orig: Option<*const u8>) -> AsmFixupPos {
+        let is_non_replacing_hook = orig.is_some();
         let needs_align = {
-            let pushad_size = if let OrigFuncCallback::Hook(_) = orig { 15 } else { 0 };
+            let pushad_size = if is_non_replacing_hook { 15 } else { 0 };
             let stack_args = ::std::cmp::max(0, self.args.len() as i32 + 2 - 4);
             (pushad_size + stack_args) & 1 == 0
         };
         let align_size = if needs_align { 8 } else { 0 };
         buffer.stack_sub(align_size);
 
-        if let OrigFuncCallback::Hook(_) = orig {
+        if is_non_replacing_hook {
             buffer.pushad();
         }
-        match self.args.len() {
-            0 => buffer.mov(AsmValue::Register(2), AsmValue::Constant(self.target as u64)),
-            1 => buffer.mov(AsmValue::Register(8), AsmValue::Constant(self.target as u64)),
-            2 => buffer.mov(AsmValue::Register(9), AsmValue::Constant(self.target as u64)),
-            _ => buffer.push(AsmValue::Constant(self.target as u64)),
-        };
+        let arg_registers = [1u8, 2, 8, 9];
+        // Target (hook dyn Fn pointer) param goes to second reg that isn't used or stack
+        let value = AsmValue::Constant(self.target as u64);
+        if let Some(&out_wrapper_arg_reg) = arg_registers.get(self.args.len() + 1) {
+            buffer.mov(AsmValue::Register(out_wrapper_arg_reg), value);
+        } else {
+            buffer.push(value);
+        }
         let out_wrapper_pos = buffer.fixup_position();
-        match self.args.len() {
-            0 => buffer.mov(AsmValue::Register(1), AsmValue::Undecided),
-            1 => buffer.mov(AsmValue::Register(2), AsmValue::Undecided),
-            2 => buffer.mov(AsmValue::Register(8), AsmValue::Undecided),
-            3 => buffer.mov(AsmValue::Register(9), AsmValue::Undecided),
-            _ => buffer.push(AsmValue::Undecided),
+        // Out wrapper param goes to first reg that isn't used or stack
+        if let Some(&out_wrapper_arg_reg) = arg_registers.get(self.args.len()) {
+            buffer.mov(AsmValue::Register(out_wrapper_arg_reg), AsmValue::Undecided);
+        } else {
+            buffer.push(AsmValue::Undecided);
         }
         for val in self.args.iter().skip(4).rev() {
             buffer.push(AsmValue::from_loc(val));
         }
-        // A scope to satisfy borrowck
-        {
-            let mut move_to_reg = |pos, reg| {
-                if let Some(arg) = self.args.get(pos) {
-                    buffer.mov(AsmValue::Register(reg), AsmValue::from_loc(arg));
-                }
-            };
-            move_to_reg(0, 1);
-            move_to_reg(1, 2);
-            move_to_reg(2, 8);
-            move_to_reg(3, 9);
+        for (pos, &reg) in arg_registers.iter().enumerate() {
+            if let Some(arg) = self.args.get(pos) {
+                buffer.mov(AsmValue::Register(reg), AsmValue::from_loc(arg));
+            }
         }
         buffer.stack_sub(0x20);
         buffer.call(AsmValue::Constant(self.rust_in_wrapper as u64));
         buffer.stack_add(::std::cmp::max((self.args.len() + 2) * 8, 0x20));
-        if let OrigFuncCallback::Hook(orig) = orig {
+        if let Some(orig) = orig {
             buffer.popad();
             buffer.stack_add(align_size);
             unsafe {
                 let len = ins_len(orig, JUMP_INS_LEN);
-                buffer.copy_instructions(orig, len, |buffer| {
-                    buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
-                });
+                buffer.copy_instructions(orig, len);
+                buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
             }
         } else {
             buffer.stack_add(align_size);
@@ -222,12 +268,44 @@ impl HookWrapAssembler {
         out_wrapper_pos
     }
 
-    // Returns offset to fix delayed out address
-    fn write_out_wrapper(&self,
-                         buffer: &mut AssemblerBuf,
-                         out_wrapper_pos: AsmFixupPos,
-                         orig: Option<*const u8>,
-                        ) -> Option<ConstOffset> {
+    fn write_hook_out_wrapper(
+        &self,
+        buffer: &mut AssemblerBuf,
+        out_wrapper_pos: AsmFixupPos,
+        orig: *const u8,
+    ) {
+        let pop_size = self.write_out_wrapper_common(buffer, out_wrapper_pos);
+        // Push return address manually
+        unsafe {
+            let len = ins_len(orig, 6 + 8);
+            let ret_address = buffer.fixup_position();
+            buffer.push(AsmValue::Undecided);
+            buffer.copy_instructions(orig, len);
+            buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
+            buffer.fixup_to_position(ret_address);
+        }
+        buffer.stack_add(pop_size.0);
+        buffer.ret(0);
+    }
+
+    fn write_import_out_wrapper(
+        &self,
+        buffer: &mut AssemblerBuf,
+        out_wrapper_pos: AsmFixupPos,
+    ) -> ConstOffset {
+        let pop_size = self.write_out_wrapper_common(buffer, out_wrapper_pos);
+        let delayed_out = buffer.call_const(!0);
+        buffer.stack_add(pop_size.0);
+        buffer.ret(0);
+        delayed_out
+    }
+
+    /// Writes out wrapper up to the point of the actual function call / orig instructions
+    fn write_out_wrapper_common(
+        &self,
+        buffer: &mut AssemblerBuf,
+        out_wrapper_pos: AsmFixupPos,
+    ) -> StackPopSize {
         buffer.reset_stack_offset();
         buffer.fixup_to_position(out_wrapper_pos);
 
@@ -282,26 +360,15 @@ impl HookWrapAssembler {
             buffer.mov(AsmValue::Register(val), src);
         }
         buffer.stack_sub(stack_args.first().map(|x| x.1 as usize).unwrap_or(0x4) * 8);
-        let delayed_out = if let Some(orig) = orig {
-            // Push return address manually
-            unsafe {
-                let len = ins_len(orig, 6 + 8);
-                let ret_address = buffer.fixup_position();
-                buffer.push(AsmValue::Undecided);
-                buffer.copy_instructions(orig, len, |buffer| {
-                    buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
-                });
-                buffer.fixup_to_position(ret_address);
-            }
-            None
+        if self.stdcall {
+            StackPopSize(align_size)
         } else {
-            Some(buffer.call_const(!0))
-        };
-        buffer.stack_add(align_size + if self.stdcall { 0 } else {
-            stack_args.last().map(|x| (x.1 + 1) as usize * 8).unwrap_or(0x20)
-        });
-        buffer.ret(0);
-        delayed_out
+            let stack_alloc_size = match stack_args.last() {
+                Some(s) => (s.1 as usize + 1) * 8,
+                None => 0x20,
+            };
+            StackPopSize(align_size + stack_alloc_size)
+        }
     }
 }
 
@@ -402,14 +469,14 @@ impl HookWrapCode {
     /// without having to separately allocate it. Doing a jump that way is ideal since
     /// `jmp [0x12345678] it takes only 6 bytes on x86, while `jmp 0x12345678` takes 12, and
     /// relative jumps don't work with (rather rare use case of) aliasing view patching.
+    ///
     /// The original instructions will be copied to memory right before the wrapper,
     /// to be used when patch is disabled.
     #[cfg_attr(feature = "cargo-clippy", allow(cast_ptr_alignment))]
-    pub fn write_wrapper(
+    fn write_wrapper(
         &self,
         entry: Option<*const u8>,
         heap: &mut ExecutableHeap,
-        import_fixup: Option<*const u8>,
     ) -> GeneratedHook {
         let ins_len = |x| { unsafe { ins_len(x, JUMP_INS_LEN) } };
 
@@ -419,36 +486,66 @@ impl HookWrapCode {
             align(self.buf.len(), 8) +
             align(entry_orig_ins_len, 8) +
             8; // + 8 for pointer_to_wrapper
-        let data = heap.allocate(wrapper_len);
-        let entry_orig_ins_ptr = data;
-        let wrapper = unsafe {
-            entry_orig_ins_ptr.add(align(entry_orig_ins_len, 8))
-        };
-        let wrapper_end = unsafe {
-            wrapper.add(align(self.buf.len(), 8))
-        };
-        if let Some(entry) = entry {
-            unsafe { ptr::copy_nonoverlapping(entry, entry_orig_ins_ptr, entry_orig_ins_len) };
-        }
-        unsafe { self.buf.write(wrapper); }
-        if let Some(fixup) = import_fixup {
-            unsafe {
-                let offset = self.import_fixup_offset as isize;
-                write_unaligned(wrapper.offset(offset), fixup as usize);
+        unsafe {
+            let near_range = self.buf.instruction_ranges.iter()
+                .filter(|x| !x.orig_base.is_null())
+                .map(|x| (x.orig_base, x.orig_base.add(x.len as usize)))
+                .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
+            let data = match near_range {
+                Some(s) => heap.allocate_near(s, wrapper_len),
+                None => heap.allocate(wrapper_len),
+            };
+
+            let entry_orig_ins_ptr = data;
+            let wrapper = entry_orig_ins_ptr.add(align(entry_orig_ins_len, 8));
+            let wrapper_end = wrapper.add(align(self.buf.len(), 8));
+            if let Some(entry) = entry {
+                ptr::copy_nonoverlapping(entry, entry_orig_ins_ptr, entry_orig_ins_len);
             }
+            self.buf.write(wrapper);
+            let entry_pointer_to_wrapper = {
+                let ptr = wrapper_end as *mut *const u8;
+                *ptr = wrapper;
+                ptr
+            };
+            let entry = GeneratedHook {
+                wrapper,
+                orig_ins_len: entry_orig_ins_len,
+                orig_ins: entry_orig_ins_ptr,
+                pointer_to_wrapper: entry_pointer_to_wrapper,
+            };
+            entry
         }
-        let entry_pointer_to_wrapper = unsafe {
-            let ptr = wrapper_end as *mut *const u8;
-            *ptr = wrapper;
-            ptr
-        };
-        let entry = GeneratedHook {
-            wrapper,
-            orig_ins_len: entry_orig_ins_len,
-            orig_ins: entry_orig_ins_ptr,
-            pointer_to_wrapper: entry_pointer_to_wrapper,
-        };
-        entry
+    }
+
+    pub fn write_import_wrapper(
+        &self,
+        heap: &mut ExecutableHeap,
+        import_fixup: *const u8,
+    ) -> GeneratedHook {
+        let wrapper_len =
+            align(self.buf.len(), 8) +
+            8; // + 8 for pointer_to_wrapper
+        let data = heap.allocate(wrapper_len);
+        unsafe {
+            let wrapper = data;
+            let wrapper_end = wrapper.add(align(self.buf.len(), 8));
+            self.buf.write(wrapper);
+            (wrapper.add(self.import_fixup_offset) as *mut usize)
+                .write_unaligned(import_fixup as usize);
+            let entry_pointer_to_wrapper = {
+                let ptr = wrapper_end as *mut *const u8;
+                *ptr = wrapper;
+                ptr
+            };
+            let entry = GeneratedHook {
+                wrapper,
+                orig_ins_len: 0,
+                orig_ins: data,
+                pointer_to_wrapper: entry_pointer_to_wrapper,
+            };
+            entry
+        }
     }
 }
 
@@ -458,6 +555,14 @@ pub struct AssemblerBuf {
     fixups: SmallVec<[(usize, u64); 4]>,
     constants: SmallVec<[(usize, u64); 8]>,
     stack_offset: i32,
+    // Will need to copy instructions at most once per hook
+    instruction_ranges: [InstructionRange; 1],
+}
+
+struct InstructionRange {
+    orig_base: *const u8,
+    buf_pos: u32,
+    len: u32,
 }
 
 pub struct AsmFixupPos(usize);
@@ -469,6 +574,11 @@ impl AssemblerBuf {
             fixups: SmallVec::new(),
             constants: SmallVec::new(),
             stack_offset: 0,
+            instruction_ranges: [InstructionRange {
+                orig_base: ptr::null(),
+                buf_pos: 0,
+                len: 0,
+            }],
         }
     }
 
@@ -494,18 +604,19 @@ impl AssemblerBuf {
         }
     }
 
-    /// Instruction copying needs some extra buffer for expanded rip-relative
-    /// jumps/calls, which will be inserted after the callback returns.
-    /// So any code that wants to be inserted after copied instructions
-    /// should be added in the callback, ending with a jump/etc.
-    unsafe fn copy_instructions<F>(&mut self, source: *const u8, amt: usize, cb: F)
-    where F: FnOnce(&mut Self)
-    {
-        let copy_start = self.buf.len();
-        copy_instructions_reserve(source, &mut self.buf, amt);
-        let copy_end = self.buf.len();
-        cb(self);
-        copy_instructions(source, &mut self.buf, copy_start, copy_end, amt);
+    unsafe fn copy_instructions(&mut self, source: *const u8, amt: usize) {
+        let buf_pos = self.buf.len();
+        copy_instructions(source, &mut self.buf, amt);
+        let copy_len = self.buf.len() - buf_pos;
+        debug_assert!(
+            self.instruction_ranges[0].orig_base.is_null(),
+            "Second instruction copy is not allowed",
+        );
+        self.instruction_ranges[0] = InstructionRange {
+            orig_base: source,
+            buf_pos: buf_pos as u32,
+            len: copy_len as u32,
+        };
     }
 
     fn write_fixups(&mut self) -> ConstOffsets {
@@ -525,6 +636,13 @@ impl AssemblerBuf {
         for &(fixup, value) in self.fixups.iter() {
             let value_pos = fixup + 4 + LE::read_u32(&self.buf[fixup..(fixup + 4)]) as usize;
             write_unaligned(out.offset(value_pos as isize), value.wrapping_add(diff as u64));
+        }
+        for range in self.instruction_ranges.iter().filter(|x| !x.orig_base.is_null()) {
+            fixup_relative_instructions(
+                range.orig_base,
+                out.add(range.buf_pos as usize),
+                range.len as usize,
+            );
         }
     }
 
@@ -717,110 +835,33 @@ impl AssemblerBuf {
         }
     }
 
-    fn call_const(&mut self, val: u64) -> ConstOffset{
+    fn call_const(&mut self, val: u64) -> ConstOffset {
         self.buf.extend_from_slice(&[0xff, 0x15, 0x00, 0x00, 0x00, 0x00]);
         self.constants.push((self.buf.len() - 4, val));
         ConstOffset(self.constants.len() - 1)
     }
 }
 
-/// Copies instructions to dest[dest_pos..dest_end], appending to dest
-/// if needed for long jumps
+/// Does not fix rip-relative instructions, caller will have to do it afterwards.
 unsafe fn copy_instructions(
     src: *const u8,
     dst: &mut Vec<u8>,
-    mut dest_pos: usize,
-    dest_end: usize,
     min_length: usize,
 ) {
-    let mut len = min_length as isize;
-    let mut pos = src;
-    for (opcode, _) in lde::X64.iter(slice::from_raw_parts(src, min_length + 32), 0) {
-        if len <= 0 {
-            break;
-        }
-        let ins_len = opcode.len() as isize;
-        if opcode.len() == 7 && &opcode[1..3] == &[0xff, 0x25] && opcode[0] & 0xf0 == 0x40 {
-            // Jmp [rip + offset] with (unnecessary) rex prefix
-            // replace with jmp [rip + 6]; db xxxx_xxxx_xxxx_xxxx
-            let offset = *(pos.add(3) as *const i32);
-            let dest = *(pos.offset(offset as isize + 7) as *const u64);
-
-            let db_offset = (dst.len() - (dest_pos + 6)) as u32;
-            let out = &mut dst[dest_pos..][..6];
-            out[0] = 0xff;
-            out[1] = 0x25;
-            LE::write_u32(&mut out[2..], db_offset);
-            dst.extend_from_slice(&(dest as u64).to_le_bytes());
-            dest_pos += 6;
-        } else if opcode.len() == 6 && &opcode[..2] == [0xff, 0x25] {
-            // Jmp [rip + offset]
-            // replace with jmp [rip + 6]; db xxxx_xxxx_xxxx_xxxx
-            let offset = *(pos.add(2) as *const i32);
-            let dest = *(pos.offset(offset as isize + 6) as *const u64);
-
-            let db_offset = (dst.len() - (dest_pos + 6)) as u32;
-            let out = &mut dst[dest_pos..][..6];
-            out[0] = 0xff;
-            out[1] = 0x25;
-            LE::write_u32(&mut out[2..], db_offset);
-            dst.extend_from_slice(&(dest as u64).to_le_bytes());
-            dest_pos += 6;
-        } else if opcode[0] == 0xe9 || opcode[0] == 0xe8 {
-            // Long jump / call
-            // replace with jmp [rip + 6]; db xxxx_xxxx_xxxx_xxxx
-            let second_byte = match opcode[0] == 0xe9 {
-                true => 0x25,
-                false => 0x15,
+    let mut left = min_length;
+    let mut copy_len = 0usize;
+    if left != 0 {
+        for (opcode, _) in lde::X64.iter(slice::from_raw_parts(src, min_length + 32), 0) {
+            let ins_len = opcode.len() as usize;
+            copy_len += ins_len;
+            left = match left.checked_sub(ins_len) {
+                Some(s) => s,
+                None => break,
             };
-            let offset = *(pos.add(1) as *const i32);
-            let dest = ((pos as isize + 5).wrapping_add(offset as isize)) as u64;
-
-            let db_offset = (dst.len() - (dest_pos + 6)) as u32;
-            let out = &mut dst[dest_pos..][..6];
-            out[0] = 0xff;
-            out[1] = second_byte;
-            LE::write_u32(&mut out[2..], db_offset);
-            dst.extend_from_slice(&(dest as u64).to_le_bytes());
-            dest_pos += 6;
-        } else {
-            let slice = slice::from_raw_parts(opcode.as_ptr(), ins_len as usize);
-            dst[dest_pos..][..slice.len()].copy_from_slice(slice);
-            dest_pos += slice.len();
         }
-        pos = pos.add(ins_len as usize);
-        len -= ins_len;
     }
-    assert_eq!(dest_pos, dest_end);
-}
-
-unsafe fn copy_instructions_reserve(
-    src: *const u8,
-    dst: &mut Vec<u8>,
-    min_length: usize,
-) {
-    let mut len = min_length as isize;
-    let mut pos = src;
-    let mut reserve_length = 0;
-    for (opcode, _) in lde::X64.iter(slice::from_raw_parts(src, min_length + 32), 0) {
-        if len <= 0 {
-            break;
-        }
-        let ins_len = opcode.len() as isize;
-        if opcode.len() == 7 && &opcode[1..3] == &[0xff, 0x25] && opcode[0] & 0xf0 == 0x40 {
-            reserve_length += 6;
-        } else if opcode.len() == 6 && &opcode[..2] == [0xff, 0x25] {
-            reserve_length += 6;
-        } else if opcode[0] == 0xe9 || opcode[0] == 0xe8 {
-            reserve_length += 6;
-        } else {
-            reserve_length += ins_len as usize;
-        }
-        pos = pos.offset(ins_len);
-        len -= ins_len;
-    }
-    let new_len = dst.len() + reserve_length;
-    dst.resize(new_len, 0u8);
+    let slice = slice::from_raw_parts(src, copy_len);
+    dst.extend_from_slice(slice);
 }
 
 pub unsafe fn ins_len(ins: *const u8, min_length: usize) -> usize {
@@ -833,3 +874,94 @@ pub unsafe fn ins_len(ins: *const u8, min_length: usize) -> usize {
     }
     sum
 }
+
+unsafe fn fixup_relative_instructions(
+    orig_base: *const u8,
+    new_base: *mut u8,
+    len: usize,
+) {
+    let offset = (new_base as usize).wrapping_sub(orig_base as usize) as u32;
+    let mut pos = 0;
+    while pos < len {
+        let mut ins_bytes = new_base.add(pos);
+        // Skip past prefixes
+        while is_prefix(*ins_bytes) {
+            ins_bytes = ins_bytes.add(1);
+            pos += 1;
+        }
+        let ins_len = ins_len(ins_bytes as *const u8, 1);
+        let bit_pair_index = if *ins_bytes == 0xf {
+            0x100 + *ins_bytes.add(1) as usize
+        } else {
+            *ins_bytes as usize
+        };
+        let ins_param = ins_bytes.add(1 + (bit_pair_index >> 8));
+        let index = bit_pair_index >> 2;
+        let shift = (bit_pair_index & 3) << 1;
+        let info = (INSTRUCTION_INFO[index] >> shift) & 3;
+        if info != 0 {
+            if info == 1 {
+                // ModRM byte, rip-relative if 0xc7 == 5
+                let rm = *ins_param;
+                if rm & 0xc7 == 5 {
+                    let rel = ins_param.add(1) as *mut u32;
+                    rel.write_unaligned(rel.read_unaligned().wrapping_sub(offset));
+                }
+            } else {
+                // Relative jump / call
+                // Can't be prefix since they're skipped over at is_prefix
+                let rel = ins_param as *mut u32;
+                rel.write_unaligned(rel.read_unaligned().wrapping_sub(offset));
+            }
+        }
+        pos += ins_len;
+    }
+}
+
+fn is_prefix(byte: u8) -> bool {
+    let index = byte as usize >> 2;
+    let shift = (byte & 3) << 1;
+    (INSTRUCTION_INFO[index] >> shift) & 3 == 3
+}
+
+/// 2 bits per instruction:
+/// 00 = Nothing
+/// 01 = Has modrm byte
+/// 10 = Relative u32 jump
+/// 11 = Prefix
+static INSTRUCTION_INFO: [u8; 0x80] = [
+    //         03 02 01 00    07 06 05 04    0b 0a 09 08    0f 0e 0d 0c
+    /* 00 */ 0b01_01_01_01, 0b00_00_00_00, 0b01_01_01_01, 0b00_00_00_00,
+    /* 10 */ 0b01_01_01_01, 0b00_00_00_00, 0b01_01_01_01, 0b00_00_00_00,
+    /* 20 */ 0b01_01_01_01, 0b00_00_00_00, 0b01_01_01_01, 0b00_00_00_00,
+    /* 30 */ 0b01_01_01_01, 0b00_00_00_00, 0b01_01_01_01, 0b00_00_00_00,
+    /* 40 */ 0b11_11_11_11, 0b11_11_11_11, 0b11_11_11_11, 0b11_11_11_11,
+    /* 50 */ 0b00_00_00_00, 0b00_00_00_00, 0b00_00_00_00, 0b00_00_00_00,
+    /* 60 */ 0b01_00_00_00, 0b11_11_11_11, 0b01_00_01_00, 0b00_00_00_00,
+    /* 70 */ 0b00_00_00_00, 0b00_00_00_00, 0b00_00_00_00, 0b00_00_00_00,
+    /* 80 */ 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01,
+    /* 90 */ 0b00_00_00_00, 0b00_00_00_00, 0b11_00_00_00, 0b00_00_00_00,
+    /* a0 */ 0b00_00_00_00, 0b00_00_00_00, 0b00_00_00_00, 0b00_00_00_00,
+    /* b0 */ 0b00_00_00_00, 0b00_00_00_00, 0b00_00_00_00, 0b00_00_00_00,
+    /* c0 */ 0b00_00_01_01, 0b01_01_00_00, 0b00_00_00_00, 0b00_00_00_00,
+    /* d0 */ 0b01_01_01_01, 0b00_00_00_00, 0b00_00_00_00, 0b00_00_00_00,
+    /* e0 */ 0b00_00_00_00, 0b00_00_00_00, 0b00_00_10_10, 0b00_00_00_00,
+    /* f0 */ 0b11_11_00_00, 0b01_01_00_00, 0b00_00_00_00, 0b01_01_00_00,
+    //            03 02 01 00    07 06 05 04    0b 0a 09 08    0f 0e 0d 0c
+    /* 0f 00 */ 0b00_00_00_00, 0b00_00_00_00, 0b00_00_00_00, 0b00_00_01_00,
+    /* 0f 10 */ 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01,
+    /* 0f 20 */ 0b00_00_00_00, 0b00_00_00_00, 0b01_01_01_01, 0b01_01_01_01,
+    /* 0f 30 */ 0b00_00_00_00, 0b00_00_00_00, 0b01_01_01_01, 0b00_00_00_00,
+    /* 0f 40 */ 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01,
+    /* 0f 50 */ 0b01_01_01_00, 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01,
+    /* 0f 60 */ 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01,
+    /* 0f 70 */ 0b00_00_00_01, 0b00_01_01_01, 0b01_01_01_01, 0b01_01_01_01,
+    /* 0f 80 */ 0b10_10_10_10, 0b10_10_10_10, 0b10_10_10_10, 0b10_10_10_10,
+    /* 0f 90 */ 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01,
+    /* 0f a0 */ 0b01_00_00_00, 0b00_00_01_01, 0b01_00_00_00, 0b01_00_01_01,
+    /* 0f b0 */ 0b01_00_01_01, 0b01_01_00_00, 0b01_01_01_01, 0b01_01_01_01,
+    /* 0f c0 */ 0b01_01_01_01, 0b01_01_01_01, 0b00_00_00_00, 0b00_00_00_00,
+    /* 0f d0 */ 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01,
+    /* 0f e0 */ 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01,
+    /* 0f f0 */ 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01, 0b01_01_01_01,
+];
