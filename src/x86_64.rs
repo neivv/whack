@@ -851,15 +851,16 @@ unsafe fn copy_instructions(
 ) {
     let mut left = min_length;
     let mut copy_len = 0usize;
-    if left != 0 {
-        for (opcode, _) in lde::X64.iter(slice::from_raw_parts(src, min_length + 32), 0) {
-            let ins_len = opcode.len() as usize;
-            copy_len += ins_len;
-            left = match left.checked_sub(ins_len) {
-                Some(s) => s,
-                None => break,
-            };
+    for (opcode, _) in lde::X64.iter(slice::from_raw_parts(src, min_length + 32), 0) {
+        if left == 0 {
+            break;
         }
+        let ins_len = opcode.len() as usize;
+        copy_len += ins_len;
+        left = match left.checked_sub(ins_len) {
+            Some(s) => s,
+            None => break,
+        };
     }
     let slice = slice::from_raw_parts(src, copy_len);
     dst.extend_from_slice(slice);
