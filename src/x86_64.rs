@@ -182,6 +182,7 @@ impl HookWrapAssembler {
         };
         let out_wrapper_pos = self.write_in_wrapper(&mut buffer, orig_ptr);
         if let OrigFuncCallback::Overwritten(orig) = orig {
+            buffer.align(16);
             self.write_hook_out_wrapper(&mut buffer, out_wrapper_pos, orig);
         }
         buffer.align(16);
@@ -484,7 +485,7 @@ impl HookWrapCode {
 
         let wrapper_len =
             align(self.buf.len(), 8) +
-            align(entry_orig_ins_len, 8) +
+            align(entry_orig_ins_len, 16) +
             8; // + 8 for pointer_to_wrapper
         unsafe {
             let near_range = self.buf.instruction_ranges.iter()
@@ -497,7 +498,7 @@ impl HookWrapCode {
             };
 
             let entry_orig_ins_ptr = data;
-            let wrapper = entry_orig_ins_ptr.add(align(entry_orig_ins_len, 8));
+            let wrapper = entry_orig_ins_ptr.add(align(entry_orig_ins_len, 16));
             let wrapper_end = wrapper.add(align(self.buf.len(), 8));
             if let Some(entry) = entry {
                 ptr::copy_nonoverlapping(entry, entry_orig_ins_ptr, entry_orig_ins_len);
@@ -599,7 +600,7 @@ impl AssemblerBuf {
     }
 
     pub fn align(&mut self, amount: usize) {
-        while self.buf.len() % amount != 0 {
+        while self.buf.len() & (amount - 1) != 0 {
             self.buf.push(0xcc);
         }
     }

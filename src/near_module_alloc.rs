@@ -78,7 +78,7 @@ impl NearModuleAllocator {
     }
 
     pub fn allocate(&mut self, size: usize) -> *mut u8 {
-        let alloc_size = align_word(size);
+        let alloc_size = align_size(size, 16);
         if self.capacity() < size {
             if !self.alloc_page(alloc_size) {
                 panic!("Failed to allocate");
@@ -96,7 +96,7 @@ impl NearModuleAllocator {
         range: (*const u8, *const u8),
         size: usize,
     ) -> Option<NonNull<u8>> {
-        let alloc_size = align_word(size);
+        let alloc_size = align_size(size, 16);
         if self.capacity() < size {
             if !self.alloc_page(alloc_size) {
                 return None;
@@ -123,11 +123,6 @@ fn is_near(ptr: *mut u8, (start, end): (*const u8, *const u8), len: usize) -> bo
     let min = (end as usize).wrapping_sub(0x7000_0000);
     let max = (start as usize).wrapping_add(0x7000_0000 - len);
     (ptr as usize).wrapping_sub(min) < max.wrapping_sub(min)
-}
-
-#[inline]
-pub const fn align_word(val: usize) -> usize {
-    (val.wrapping_sub(1) | mem::size_of::<usize>().wrapping_sub(1)).wrapping_add(1)
 }
 
 #[inline]
