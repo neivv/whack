@@ -233,53 +233,61 @@ impl HookWrapAssembler {
     /// Orig should be set for call_hook only
     fn write_in_wrapper(&self, buffer: &mut AssemblerBuf, orig: Option<*const u8>) -> AsmFixupPos {
         let is_non_replacing_hook = orig.is_some();
-        let needs_align = {
-            let pushad_size = if is_non_replacing_hook { 15 } else { 0 };
-            let stack_args = ::std::cmp::max(0, self.args.len() as i32 + 2 - 4);
-            (pushad_size + stack_args) & 1 == 0
-        };
-        let align_size = if needs_align { 8 } else { 0 };
-        buffer.stack_sub(align_size);
 
+        // Reserve space for calling the rust in wrapper (args + 1 for out wrap + 1 for hook)
+        // Always at least 4 for the x64 shadow space.
+        let stack_args_amount = (self.args.len() + 2).max(4) << 3;
+        let mut stack_reserve_amount = stack_args_amount;
         if is_non_replacing_hook {
-            buffer.pushad();
+            // Reserve space for storing all registers except rsp
+            stack_reserve_amount += 15 * 8;
         }
+        // | 8 to align stack correctly if it was not.
+        let stack_reserve_size = stack_reserve_amount | 8;
+        buffer.stack_sub(stack_reserve_size);
+
+        // At offset past args
+        let register_store_offset = stack_args_amount;
+        if is_non_replacing_hook {
+            buffer.store_registers(register_store_offset);
+        }
+
         let arg_registers = [1u8, 2, 8, 9];
         // Target (hook dyn Fn pointer) param goes to second reg that isn't used or stack
         let value = AsmValue::Constant(self.target as u64);
-        if let Some(&out_wrapper_arg_reg) = arg_registers.get(self.args.len() + 1) {
-            buffer.mov(AsmValue::Register(out_wrapper_arg_reg), value);
+        let arg_idx = self.args.len() + 1;
+        if let Some(&out_wrapper_arg_reg) = arg_registers.get(arg_idx) {
+            buffer.mov_to_reg(out_wrapper_arg_reg, value);
         } else {
-            buffer.push(value);
+            buffer.mov_to_stack(arg_idx << 3, value);
         }
         let out_wrapper_pos = buffer.fixup_position();
         // Out wrapper param goes to first reg that isn't used or stack
+        let arg_idx = self.args.len();
         if let Some(&out_wrapper_arg_reg) = arg_registers.get(self.args.len()) {
-            buffer.mov(AsmValue::Register(out_wrapper_arg_reg), AsmValue::Undecided);
+            buffer.mov_to_reg(out_wrapper_arg_reg, AsmValue::Undecided);
         } else {
-            buffer.push(AsmValue::Undecided);
+            buffer.mov_to_stack(arg_idx << 3, AsmValue::Undecided);
         }
-        for val in self.args.iter().skip(4).rev() {
-            buffer.push(AsmValue::from_loc(val));
+        for (arg_idx, val) in self.args.iter().enumerate().skip(4) {
+            buffer.mov_to_stack(arg_idx << 3, AsmValue::from_loc(val));
         }
         for (pos, &reg) in arg_registers.iter().enumerate() {
             if let Some(arg) = self.args.get(pos) {
-                buffer.mov(AsmValue::Register(reg), AsmValue::from_loc(arg));
+                buffer.mov_to_reg(reg, AsmValue::from_loc(arg));
             }
         }
-        buffer.stack_sub(0x20);
         buffer.call(AsmValue::Constant(self.rust_in_wrapper as u64));
-        buffer.stack_add(::std::cmp::max((self.args.len() + 2) * 8, 0x20));
         if let Some(orig) = orig {
-            buffer.popad();
-            buffer.stack_add(align_size);
+            buffer.restore_registers(register_store_offset);
+            buffer.stack_add(stack_reserve_size);
             unsafe {
                 let len = ins_len(orig, JUMP_INS_LEN);
                 buffer.copy_instructions(orig, len);
                 buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
             }
         } else {
-            buffer.stack_add(align_size);
+            buffer.stack_add(stack_reserve_size);
             if self.stdcall {
                 let stack_arg_count = self.args.iter().filter_map(|x| x.stack_to_opt()).count();
                 buffer.ret(stack_arg_count * 8);
@@ -405,7 +413,7 @@ impl HookWrapAssembler {
                 3 => AsmValue::Register(9),
                 _ => AsmValue::Stack(pos as i16),
             };
-            buffer.mov(AsmValue::Register(val), src);
+            buffer.mov_to_reg(val, src);
         }
         buffer.stack_sub(stack_args.first().map(|x| x.1 as usize).unwrap_or(0x4) * 8);
         if self.stdcall {
@@ -444,7 +452,7 @@ impl FuncAssembler {
             self.buf.push(AsmValue::Register(reg));
             self.preserved_regs.push(reg);
         }
-        self.buf.mov(AsmValue::Register(reg), AsmValue::for_callee(self.arg_num));
+        self.buf.mov_to_reg(reg, AsmValue::for_callee(self.arg_num));
         self.arg_num += 1;
     }
 
@@ -742,37 +750,50 @@ impl AssemblerBuf {
         self.stack_offset -= 8;
     }
 
-    pub fn pushad(&mut self) {
-        for x in 0x50..0x55 {
-            self.buf.push(x);
+    pub fn store_registers(&mut self, offset: usize) {
+        let mut offset = offset;
+        for i in 0..16 {
+            if i == 4 {
+                continue;
+            }
+            self.mov_to_stack(offset, AsmValue::Register(i));
+            offset += 8;
         }
-        // Skip rsp
-        for x in 0x56..0x58 {
-            self.buf.push(x);
-        }
-        for x in 0x50..0x58 {
-            self.buf.extend_from_slice(&[0x41, x]);
-        }
-        self.stack_offset += 15 * 8;
     }
 
-    pub fn popad(&mut self) {
-        for x in (0x58..0x60).rev() {
-            self.buf.extend_from_slice(&[0x41, x]);
+    pub fn restore_registers(&mut self, offset: usize) {
+        let mut offset = offset;
+        for i in 0..16 {
+            if i == 4 {
+                continue;
+            }
+            if offset < 0x80 {
+                let bytes = [
+                    0x48 | ((i & 8) >> 1),
+                    0x8b,
+                    0x44 + ((i & 7) << 3),
+                    0xe4,
+                    offset as u8,
+                ];
+                self.buf.extend_from_slice(&bytes);
+            } else {
+                let mut bytes = [
+                    0x48 | ((i & 8) >> 1),
+                    0x8b,
+                    0x84 + ((i & 7) << 3),
+                    0xe4,
+                    0x00, 0x00, 0x00, 0x00,
+                ];
+                LE::write_u32(&mut bytes[4..], offset as u32);
+                self.buf.extend_from_slice(&bytes);
+            }
+            offset += 8;
         }
-        for x in (0x5e..0x60).rev() {
-            self.buf.push(x);
-        }
-        // Skip rsp
-        for x in (0x58..0x5d).rev() {
-            self.buf.push(x);
-        }
-        self.stack_offset -= 15 * 8;
     }
 
-    pub fn mov(&mut self, to: AsmValue, from: AsmValue) {
-        match (to, from) {
-            (AsmValue::Register(to), AsmValue::Register(from)) => {
+    pub fn mov_to_reg(&mut self, to: u8, from: AsmValue) {
+        match from {
+            AsmValue::Register(from) => {
                 if to != from {
                     let reg_spec_byte = 0x48 + if to >= 8 { 1 } else { 0 } +
                         if from >= 8 { 4 } else { 0 };
@@ -781,14 +802,11 @@ impl AssemblerBuf {
                     );
                 }
             }
-            (AsmValue::Register(to), AsmValue::Stack(from)) => {
+            AsmValue::Stack(from) => {
                 let reg_spec_byte = 0x48 + if to >= 8 { 4 } else { 0 };
                 self.buf.push(reg_spec_byte);
                 let offset = (i32::from(from) * 8) + 8 + self.stack_offset;
                 match offset {
-                    0 => {
-                        self.buf.extend_from_slice(&[0x8b, 0x4 + (to & 7) * 8, 0xe4]);
-                    }
                     x if x < 0x80 => {
                         self.buf.extend_from_slice(&[0x8b, 0x44 + (to & 7) * 8, 0xe4, x as u8]);
                     }
@@ -798,21 +816,54 @@ impl AssemblerBuf {
                     }
                 }
             }
-            (AsmValue::Register(to), AsmValue::Undecided) => {
+            AsmValue::Undecided => {
                 let reg_spec_byte = 0x48 + if to >= 8 { 4 } else { 0 };
                 self.buf.extend_from_slice(
                     &[reg_spec_byte, 0x8b, 0x5 + (to & 7) * 8, 0x00, 0x00, 0x00, 0x00],
                 );
                 self.fixups.push((self.buf.len() - 4, 0));
             }
-            (AsmValue::Register(to), AsmValue::Constant(val)) => {
+            AsmValue::Constant(val) => {
                 let reg_spec_byte = 0x48 + if to >= 8 { 4 } else { 0 };
                 self.buf.extend_from_slice(
                     &[reg_spec_byte, 0x8b, (to & 7) * 8 + 0x5, 0x00, 0x00, 0x00, 0x00],
                 );
                 self.constants.push((self.buf.len() - 4, val));
             }
-            (_, _) => unimplemented!(),
+        }
+    }
+
+    /// Writes move to [rsp + offset] (Dest Offset not affected by self.stack_offset,
+    /// from stack offset is).
+    /// May clobber rax if necessary.
+    pub fn mov_to_stack(&mut self, offset: usize, from: AsmValue) {
+        match from {
+            AsmValue::Register(from) => {
+                if offset < 0x80 {
+                    let bytes = [
+                        0x48 | ((from & 8) >> 1),
+                        0x89,
+                        0x44 | ((from & 7) << 3),
+                        0x24,
+                        offset as u8,
+                    ];
+                    self.buf.extend_from_slice(&bytes);
+                } else {
+                    let mut bytes = [
+                        0x48 | ((from & 8) >> 1),
+                        0x89,
+                        0x84 | ((from & 7) << 3),
+                        0x24,
+                        0x00, 0x00, 0x00, 0x00,
+                    ];
+                    LE::write_u32(&mut bytes[4..], offset as u32);
+                    self.buf.extend_from_slice(&bytes);
+                }
+            }
+            AsmValue::Stack(_) | AsmValue::Undecided | AsmValue::Constant(..) => {
+                self.mov_to_reg(0, from);
+                self.mov_to_stack(offset, AsmValue::Register(0));
+            }
         }
     }
 
