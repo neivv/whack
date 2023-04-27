@@ -168,6 +168,27 @@ impl HookWrapAssembler {
         self.args.push(arg);
     }
 
+    fn is_win64_calling_convention(&self) -> bool {
+        let expected_regs = [
+            Location::Register(1),
+            Location::Register(2),
+            Location::Register(8),
+            Location::Register(9),
+        ];
+        for (i, arg) in self.args.iter().enumerate() {
+            if let Some(reg) = expected_regs.get(i) {
+                if arg != reg {
+                    return false;
+                }
+            } else {
+                if *arg != Location::Stack(i as i16) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     pub fn generate_and_write_wrapper(
         &self,
         orig: OrigFuncCallback,
@@ -269,16 +290,42 @@ impl HookWrapAssembler {
         out_wrapper_pos
     }
 
+    fn write_standard_hook_out_wrapper(
+        &self,
+        buffer: &mut AssemblerBuf,
+        out_wrapper_pos: AsmFixupPos,
+        orig: *const u8,
+    ) {
+        // Just execute orig instructions and jump
+        buffer.reset_stack_offset();
+        buffer.fixup_to_position(out_wrapper_pos);
+        unsafe {
+            let len = ins_len(orig, JUMP_INS_LEN);
+            buffer.copy_instructions(orig, len);
+            // If the jump is included in instruction copy range,
+            // it'll be automatically fixed to point to original
+            // code as well when the wrapper is written to exec memory.
+            // (Have it jump past last copied instruction -- so at start
+            // of own instruction -- so rip - 5)
+            buffer.buf.extend_from_slice(&[0xe9, 0xfb, 0xff, 0xff, 0xff]);
+            buffer.instruction_ranges[0].len += 5;
+        }
+    }
+
     fn write_hook_out_wrapper(
         &self,
         buffer: &mut AssemblerBuf,
         out_wrapper_pos: AsmFixupPos,
         orig: *const u8,
     ) {
+        if self.is_win64_calling_convention() {
+            self.write_standard_hook_out_wrapper(buffer, out_wrapper_pos, orig);
+            return;
+        }
         let pop_size = self.write_out_wrapper_common(buffer, out_wrapper_pos);
         // Push return address manually
         unsafe {
-            let len = ins_len(orig, 6 + 8);
+            let len = ins_len(orig, JUMP_INS_LEN);
             let ret_address = buffer.fixup_position();
             buffer.push(AsmValue::Undecided);
             buffer.copy_instructions(orig, len);
