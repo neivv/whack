@@ -22,6 +22,7 @@ pub trait AddressHook {
         self,
         val: Self::Fnptr,
         exec_heap: &mut platform::ExecutableHeap,
+        unwind_tables: &mut platform::UnwindTables,
     ) -> *const u8;
     /// Generates the wrapper code, which may be used multiple times.
     ///
@@ -231,9 +232,14 @@ macro_rules! whack_addr_hook_common {
             self,
             val: Self::Fnptr,
             exec_heap: &mut $crate::platform::ExecutableHeap,
+            unwind_tables: &mut $crate::platform::UnwindTables,
         ) -> *const u8 {
             // So that H becomes a valid type
-            fn x<H, T>(target: T, exec_heap: &mut $crate::platform::ExecutableHeap) -> *const u8
+            fn x<H, T>(
+                target: T,
+                exec_heap: &mut $crate::platform::ExecutableHeap,
+                unwind_tables: &mut $crate::platform::UnwindTables,
+            ) -> *const u8
             where H: $crate::AddressHookClosure<T>
             {
                 let target_closure = {
@@ -246,6 +252,7 @@ macro_rules! whack_addr_hook_common {
                         $crate::OrigFuncCallback::None,
                         None,
                         exec_heap,
+                        unwind_tables,
                     );
                 entry.wrapper
             }
@@ -254,7 +261,7 @@ macro_rules! whack_addr_hook_common {
                 val($($an),*)
             };
 
-            x::<Self, _>(target, exec_heap)
+            x::<Self, _>(target, exec_heap, unwind_tables)
         }
     }
 }

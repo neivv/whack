@@ -5,6 +5,7 @@ use std::slice;
 use lde;
 use byteorder::{ByteOrder, LE};
 use smallvec::SmallVec;
+use winapi::um::winnt::{RtlAddFunctionTable, RtlDeleteFunctionTable, RUNTIME_FUNCTION};
 
 use crate::helpers::*;
 use crate::insertion_sort;
@@ -38,24 +39,137 @@ impl ExecutableHeap {
     /// Function for just allocating some executable memory.
     /// Not guaranteed to be near any specific module.
     pub fn allocate(&mut self, size: usize) -> *mut u8 {
+        self.any_allocator().allocate(size)
+    }
+
+    fn any_allocator(&mut self) -> &mut NearModuleAllocator {
         if self.allocators.is_empty() {
             let exe_handle = exe_handle() as *const u8;
             self.allocators.push(NearModuleAllocator::new(exe_handle));
         }
-        self.allocators[0].allocate(size)
+        &mut self.allocators[0]
     }
 
     /// ptr is start,end range to which the returned allocation must be near.
-    pub fn allocate_near(&mut self, ptr: (*const u8, *const u8), size: usize) -> *mut u8 {
+    ///
+    /// Returns also the allocator base for unwind info adding.
+    fn allocate_near(&mut self, ptr: (*const u8, *const u8), size: usize) -> (*const u8, *mut u8) {
         for alloc in &mut self.allocators {
             if let Some(s) = alloc.allocate_near(ptr, size) {
-                return s.as_ptr();
+                return (alloc.base(), s.as_ptr());
             }
         }
         let mut allocator = NearModuleAllocator::new(ptr.0);
         let ret = allocator.allocate_near(ptr, size).expect("Failed to allocate");
+        let ret = (allocator.base(), ret.as_ptr());
         self.allocators.push(allocator);
-        ret.as_ptr()
+        ret
+    }
+
+    /// Returns allocator which started at `base`
+    fn allocator_for_base(&mut self, base: *const u8) -> Option<&mut NearModuleAllocator> {
+        self.allocators.iter_mut().find(|x| x.base() == base)
+    }
+}
+
+pub struct UnwindTables {
+    tables: Vec<UnwindTable>,
+    buffered_function_decls: Vec<RUNTIME_FUNCTION>,
+    buffered_unwind_info: Vec<u8>,
+    buffered_base: *const u8,
+}
+
+struct UnwindTable {
+    // NearModuleAllocator base
+    base: *const u8,
+    // ptr, size in objects
+    functions: (*mut RUNTIME_FUNCTION, usize),
+}
+
+unsafe impl Send for UnwindTables {}
+unsafe impl Sync for UnwindTables {}
+
+impl UnwindTables {
+    pub const fn new() -> UnwindTables {
+        UnwindTables {
+            tables: Vec::new(),
+            buffered_function_decls: Vec::new(),
+            buffered_unwind_info: Vec::new(),
+            buffered_base: ptr::null(),
+        }
+    }
+
+    fn add_buffered(
+        &mut self,
+        base: *const u8,
+        function: (*const u8, *const u8),
+        info: &[u8],
+        heap: &mut ExecutableHeap,
+    ) {
+        if base != self.buffered_base {
+            self.commit(heap);
+        }
+        self.buffered_base = base;
+        let mut func = unsafe { mem::zeroed::<RUNTIME_FUNCTION>() };
+        func.BeginAddress = u32::try_from((function.0 as usize) - (base as usize)).unwrap();
+        func.EndAddress = u32::try_from((function.1 as usize) - (base as usize)).unwrap();
+        unsafe { *func.u.UnwindInfoAddress_mut() = self.buffered_unwind_info.len() as u32; }
+        self.buffered_function_decls.push(func);
+        assert!(info.len() & 3 == 0);
+        self.buffered_unwind_info.extend_from_slice(&info);
+    }
+
+    pub fn commit(&mut self, heap: &mut ExecutableHeap) {
+        if self.buffered_function_decls.is_empty() {
+            return;
+        }
+        let base = self.buffered_base;
+        let old_funcs = match self.tables.iter().find(|x| x.base == base) {
+            Some(s) => s.functions,
+            None => (self.buffered_function_decls.as_mut_ptr(), 0),
+        };
+        let buffered_func_count = self.buffered_function_decls.len();
+        let unwind_info_len = self.buffered_unwind_info.len();
+        let funcs_count = old_funcs.1 + buffered_func_count;
+        let funcs_size = funcs_count * mem::size_of::<RUNTIME_FUNCTION>();
+        let alloc_size = funcs_size + unwind_info_len;
+        let allocator = heap.allocator_for_base(base).expect("Invalid unwind info base");
+        unsafe {
+            let new_info = allocator.allocate(alloc_size);
+            let functions_out = new_info as *mut RUNTIME_FUNCTION;
+            let unwind_info_out = new_info.add(funcs_size);
+            let unwind_info_out_offset =
+                u32::try_from((unwind_info_out as usize) - (base as usize)).unwrap();
+            for func in &mut self.buffered_function_decls {
+                let old = *func.u.UnwindInfoAddress_mut();
+                *func.u.UnwindInfoAddress_mut() = old.checked_add(unwind_info_out_offset)
+                    .unwrap();
+            }
+
+            ptr::copy_nonoverlapping(old_funcs.0, functions_out, old_funcs.1);
+            ptr::copy_nonoverlapping(
+                self.buffered_function_decls.as_ptr(),
+                functions_out.add(old_funcs.1),
+                buffered_func_count,
+            );
+            ptr::copy_nonoverlapping(
+                self.buffered_unwind_info.as_ptr(),
+                unwind_info_out,
+                unwind_info_len,
+            );
+            self.tables.push(UnwindTable {
+                base,
+                functions: (functions_out, funcs_count),
+            });
+
+            if old_funcs.1 != 0 {
+                RtlDeleteFunctionTable(old_funcs.0);
+            }
+            RtlAddFunctionTable(functions_out, funcs_count as u32, base as u64);
+        }
+
+        self.buffered_function_decls.clear();
+        self.buffered_unwind_info.clear();
     }
 }
 
@@ -194,6 +308,7 @@ impl HookWrapAssembler {
         orig: OrigFuncCallback,
         entry: Option<*const u8>,
         heap: &mut ExecutableHeap,
+        unwind_tables: &mut UnwindTables,
     ) -> GeneratedHook {
         let mut buffer = AssemblerBuf::new();
 
@@ -201,7 +316,7 @@ impl HookWrapAssembler {
             OrigFuncCallback::Hook(s) => Some(s),
             _ => None,
         };
-        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, orig_ptr);
+        let (out_wrapper_pos, unwind_info) = self.write_in_wrapper(&mut buffer, orig_ptr);
         if let OrigFuncCallback::Overwritten(orig) = orig {
             buffer.align(16);
             self.write_hook_out_wrapper(&mut buffer, out_wrapper_pos, orig);
@@ -211,27 +326,34 @@ impl HookWrapAssembler {
 
         let code = HookWrapCode {
             buf: buffer,
+            unwind_info,
             import_fixup_offset: 0,
         };
-        code.write_wrapper(entry, heap)
+        code.write_wrapper(entry, heap, unwind_tables)
     }
 
     pub fn generate_import_wrapper_code(&self) -> HookWrapCode {
         let mut buffer = AssemblerBuf::new();
 
-        let out_wrapper_pos = self.write_in_wrapper(&mut buffer, None);
+        let (out_wrapper_pos, unwind_info) = self.write_in_wrapper(&mut buffer, None);
         let import_fixup_offset = self.write_import_out_wrapper(&mut buffer, out_wrapper_pos);
         buffer.align(16);
         let const_offsets = buffer.write_fixups();
 
         HookWrapCode {
             buf: buffer,
+            unwind_info,
             import_fixup_offset: const_offsets.to_offset(import_fixup_offset),
         }
     }
 
     /// Orig should be set for call_hook only
-    fn write_in_wrapper(&self, buffer: &mut AssemblerBuf, orig: Option<*const u8>) -> AsmFixupPos {
+    /// Second return value is unwind info.
+    fn write_in_wrapper(
+        &self,
+        buffer: &mut AssemblerBuf,
+        orig: Option<*const u8>,
+    ) -> (AsmFixupPos, Vec<u8>) {
         let is_non_replacing_hook = orig.is_some();
 
         // Reserve space for calling the rust in wrapper (args + 1 for out wrap + 1 for hook)
@@ -244,7 +366,24 @@ impl HookWrapAssembler {
         }
         // | 8 to align stack correctly if it was not.
         let stack_reserve_size = stack_reserve_amount | 8;
+        let prolog_start = buffer.buf.len();
         buffer.stack_sub(stack_reserve_size);
+        let prolog_end = buffer.buf.len();
+        // Adding just the stack sub as unwind info, should be enough
+        let unwind_info = [
+            0x01, // version = 1, flags = 0
+            (prolog_end - prolog_start) as u8, // Prolog size (4)
+            0x01, // Unwind code count (Just stack sub)
+            0x00, // No frame register
+            // Unwind codes
+            // Code 0 instruction end offset:
+            (prolog_end - prolog_start) as u8,
+            // Code 0 data:
+            // 2 = Small stack alloc, can represent 8 ~ 128 bytes
+            // Should check if it can fit but should never not fit.
+            0x2 | ((stack_reserve_size >> 3).wrapping_sub(1) << 4) as u8,
+            0x00, 0x00, // Align
+        ];
 
         // At offset past args
         let register_store_offset = stack_args_amount;
@@ -295,7 +434,7 @@ impl HookWrapAssembler {
                 buffer.ret(0);
             }
         }
-        out_wrapper_pos
+        (out_wrapper_pos, unwind_info.into())
     }
 
     fn write_standard_hook_out_wrapper(
@@ -513,6 +652,7 @@ impl FuncAssembler {
 
 pub struct HookWrapCode {
     buf: AssemblerBuf,
+    unwind_info: Vec<u8>,
     import_fixup_offset: usize,
 }
 
@@ -533,6 +673,7 @@ impl HookWrapCode {
         &self,
         entry: Option<*const u8>,
         heap: &mut ExecutableHeap,
+        unwind_tables: &mut UnwindTables,
     ) -> GeneratedHook {
         let ins_len = |x| { unsafe { ins_len(x, JUMP_INS_LEN) } };
 
@@ -547,10 +688,21 @@ impl HookWrapCode {
                 .filter(|x| !x.orig_base.is_null())
                 .map(|x| (x.orig_base, x.orig_base.add(x.len as usize)))
                 .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
-            let data = match near_range {
+            let (allocator_base, data) = match near_range {
                 Some(s) => heap.allocate_near(s, wrapper_len),
-                None => heap.allocate(wrapper_len),
+                None => {
+                    let alloc = heap.any_allocator();
+                    (alloc.base(), alloc.allocate(wrapper_len))
+                }
             };
+            if !self.unwind_info.is_empty() {
+                unwind_tables.add_buffered(
+                    allocator_base,
+                    (data as *const u8, data.add(wrapper_len) as *const u8),
+                    &self.unwind_info,
+                    heap,
+                );
+            }
 
             let entry_orig_ins_ptr = data;
             let wrapper = entry_orig_ins_ptr.add(align(entry_orig_ins_len, 16));

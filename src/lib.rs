@@ -193,14 +193,15 @@ impl ModulePatch {
     unsafe fn enable(
         &mut self,
         handles: &PatchEnableHandles,
-        heap: &mut platform::ExecutableHeap
+        heap: &mut platform::ExecutableHeap,
+        unwind_tables: &mut platform::UnwindTables,
     ) {
         if self.active {
             self.disable(Some(handles.write));
         }
         match self.variant {
             ModulePatchType::Hook(ref mut hook) => {
-                hook.apply(handles, heap)
+                hook.apply(handles, heap, unwind_tables)
             }
             ModulePatchType::Data(ref mut patch) => {
                 patch.apply(handles);
@@ -247,6 +248,7 @@ impl HookPatch {
         &mut self,
         handles: &PatchEnableHandles,
         heap: &mut platform::ExecutableHeap,
+        unwind_tables: &mut platform::UnwindTables,
     ) {
         let base = handles.exec as usize;
         let to_abs = |relative: usize| (base + relative) as *const u8;
@@ -262,6 +264,7 @@ impl HookPatch {
                 orig,
                 Some(to_abs(entry)),
                 heap,
+                unwind_tables,
             );
             self.entry = Some(entry);
         }
@@ -311,6 +314,32 @@ pub struct Patcher {
     patches: PatchMap<ModulePatch>,
     patch_groups: PatchMap<PatchGroup>,
     exec_heap: platform::ExecutableHeap,
+    unwind_tables: platform::UnwindTables,
+}
+
+/// Used to flush new unwind tables on drop
+struct PatcherBorrow<'b>(&'b mut Patcher);
+
+impl<'b> std::ops::Deref for PatcherBorrow<'b> {
+    type Target = Patcher;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl<'b> std::ops::DerefMut for PatcherBorrow<'b> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+    }
+}
+
+impl<'b> Drop for PatcherBorrow<'b> {
+    fn drop(&mut self) {
+        let patcher = &mut *self.0;
+        patcher.unwind_tables.commit(&mut patcher.exec_heap)
+    }
 }
 
 /// Groups of patches that apply to a single module.
@@ -333,7 +362,7 @@ struct PatchGroup {
 /// while disabled, and gives a `Patch` handle for enabling/disabling them all at once.
 #[must_use]
 pub struct ModulePatcher<'b> {
-    parent: &'b mut Patcher,
+    parent: PatcherBorrow<'b>,
     patches: Vec<patch_map::Key>,
     image_base: ImageBase,
     init_fns: Vec<InitFn>,
@@ -351,6 +380,7 @@ impl Patcher {
             patches: PatchMap::new(),
             patch_groups: PatchMap::new(),
             exec_heap: platform::ExecutableHeap::new(),
+            unwind_tables: platform::UnwindTables::new(),
         }
     }
 
@@ -365,7 +395,7 @@ impl Patcher {
         let protection = patch_enable_handles.as_ref()
             .map(|handles| platform::MemoryProtection::new(handles.write));
         ModulePatcher {
-            parent: self,
+            parent: PatcherBorrow(self),
             patches: Vec::new(),
             init_fns: Vec::new(),
             image_base,
@@ -392,7 +422,7 @@ impl Patcher {
         let protection = patch_enable_handles.as_ref()
             .map(|handles| platform::MemoryProtection::new(handles.write));
         ModulePatcher {
-            parent: self,
+            parent: PatcherBorrow(self),
             patches: Vec::new(),
             init_fns: Vec::new(),
             image_base,
@@ -422,7 +452,7 @@ impl Patcher {
         let image_base = ImageBase::Memory { write, exec: execute };
         let patch_enable_handles = image_base_to_handles_opt(&image_base);
         ModulePatcher {
-            parent: self,
+            parent: PatcherBorrow(self),
             patches: Vec::new(),
             init_fns: Vec::new(),
             image_base,
@@ -487,7 +517,9 @@ impl Patcher {
     pub fn custom_calling_convention<H>(&mut self, _hook: H, target: H::Fnptr) -> *const u8
     where H: AddressHook,
     {
-        unsafe { _hook.custom_calling_convention(target, &mut self.exec_heap) }
+        unsafe {
+            _hook.custom_calling_convention(target, &mut self.exec_heap, &mut self.unwind_tables)
+        }
     }
 
     /// Disables a patch which has been created with this `Patcher`.
@@ -535,7 +567,7 @@ impl Patcher {
             PatchEnum::Regular(ref key) => {
                 if let Some(patch) = self.patches.get_mut(key) {
                     if let Some(ref handles) = image_base_to_handles_opt(&patch.image_base) {
-                        patch.enable(handles, &mut self.exec_heap);
+                        patch.enable(handles, &mut self.exec_heap, &mut self.unwind_tables);
                     }
                 }
             }
@@ -547,7 +579,7 @@ impl Patcher {
                         }
                         for key in &group.patches {
                             if let Some(patch) = self.patches.get_mut(key) {
-                                patch.enable(handles, &mut self.exec_heap);
+                                patch.enable(handles, &mut self.exec_heap, &mut self.unwind_tables);
                             }
                         }
                     }
@@ -660,7 +692,8 @@ impl<'b> ModulePatcher<'b> {
             ty,
         });
         if let Some(ref handles) = self.patch_enable_handles {
-            variant.apply(handles, &mut self.parent.exec_heap);
+            let parent = &mut *self.parent;
+            variant.apply(handles, &mut parent.exec_heap, &mut parent.unwind_tables);
         }
         let patch = ModulePatch {
             variant: ModulePatchType::Hook(variant),
@@ -704,7 +737,7 @@ impl<'b> ModulePatcher<'b> {
 
     /// Saves the patches that were applied using this `ModulePatcher`
     /// into a group that can be enabled and disabled all at once.
-    pub fn save_patch_group(self) -> Patch {
+    pub fn save_patch_group(mut self) -> Patch {
         let group_key = self.parent.patch_groups.insert(PatchGroup {
             image_base: self.image_base,
             patches: self.patches,

@@ -48,6 +48,17 @@ impl ExecutableHeap {
     }
 }
 
+pub struct UnwindTables;
+
+impl UnwindTables {
+    pub const fn new() -> UnwindTables {
+        UnwindTables
+    }
+
+    pub fn commit(&mut self, _heap: &mut ExecutableHeap) {
+    }
+}
+
 struct PopParams {
     stack_pop_size: usize,
     preserved_regs: u8,
@@ -149,6 +160,7 @@ impl HookWrapAssembler {
         orig: OrigFuncCallback,
         entry: Option<*const u8>,
         heap: &mut ExecutableHeap,
+        _unwind_tables: &mut UnwindTables,
     ) -> GeneratedHook {
         let mut buffer = AssemblerBuf::new();
         let orig_ptr = match orig {

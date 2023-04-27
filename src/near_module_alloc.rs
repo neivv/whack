@@ -8,6 +8,7 @@ use winapi::um::winnt::{
 };
 
 pub struct NearModuleAllocator {
+    base: *mut u8,
     pos: *mut u8,
     page_end: *mut u8,
     allocation_granularity: usize,
@@ -29,6 +30,7 @@ impl NearModuleAllocator {
                 ((module as usize) + 0x0100_0000) as *mut u8
             };
             NearModuleAllocator {
+                base: pos,
                 pos,
                 page_end: pos,
                 allocation_granularity: info.dwAllocationGranularity as usize,
@@ -38,6 +40,11 @@ impl NearModuleAllocator {
 
     fn capacity(&self) -> usize {
         self.page_end as usize - self.pos as usize
+    }
+
+    /// First allocated address. All other allocations will be at greater address afterwards.
+    pub fn base(&self) -> *const u8 {
+        self.base
     }
 
     #[must_use]
