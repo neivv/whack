@@ -230,4 +230,28 @@ mod test {
             assert_eq!((code.read_value)(), 256);
         }
     }
+
+    #[test]
+    fn hook_multiple_times() {
+        unsafe {
+            let code = load_code();
+
+            let mut patcher = Patcher::new();
+            for _ in 0..3 {
+                let mut patch = patcher.patch_memory(
+                    code.base as *mut _,
+                    code.base as *mut _,
+                    code.base as usize,
+                );
+                patch.hook_closure_address(Write, move |x, orig| {
+                    orig(x * 2);
+                }, code.write_value as usize - code.base as usize);
+            }
+
+            (code.write_value)(99);
+            assert_eq!(*(code.get_ref)(), 99 * 8);
+            assert_eq!((code.read_value)(), 99 * 8);
+            assert_eq!((code.cmp_nonzero)(), 1);
+        }
+    }
 }

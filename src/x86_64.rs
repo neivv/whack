@@ -1105,7 +1105,12 @@ unsafe fn copy_instructions(
         if left == 0 {
             break;
         }
-        let ins_len = opcode.len() as usize;
+        // Special case long jumps written by this library (jmp [rip])
+        let ins_len = if opcode[..] == [0xff, 0x25, 0x00, 0x00, 0x00, 0x00] {
+            JUMP_INS_LEN
+        } else {
+            opcode.len()
+        };
         copy_len += ins_len;
         left = match left.checked_sub(ins_len) {
             Some(s) => s,
@@ -1122,7 +1127,12 @@ pub unsafe fn ins_len(ins: *const u8, min_length: usize) -> usize {
         if sum >= min_length {
             break;
         }
-        sum += opcode.len();
+        // Special case long jumps written by this library (jmp [rip])
+        if opcode[..] == [0xff, 0x25, 0x00, 0x00, 0x00, 0x00] {
+            sum += JUMP_INS_LEN;
+        } else {
+            sum += opcode.len();
+        }
     }
     sum
 }
@@ -1157,7 +1167,13 @@ unsafe fn fixup_relative_instructions(
                 let rm = *ins_param;
                 if rm & 0xc7 == 5 {
                     let rel = ins_param.add(1) as *mut u32;
-                    rel.write_unaligned(rel.read_unaligned().wrapping_sub(offset));
+                    let old_val = rel.read_unaligned();
+                    // Fixup only if not pointing to the copied code itself
+                    if pos.wrapping_add(ins_len)
+                        .wrapping_add(old_val as i32 as isize as usize) >= len
+                    {
+                        rel.write_unaligned(old_val.wrapping_sub(offset));
+                    }
                 }
             } else {
                 // Relative jump / call
