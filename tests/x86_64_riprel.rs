@@ -17,6 +17,7 @@ mod test {
         0 => GetRef() -> *mut u32;
         0 => ReadAny() -> u32;
         0 => Write(u32);
+        0 => BinaryFunc(u32, u32) -> u32;
     );
 
     #[derive(Copy, Clone)]
@@ -28,6 +29,10 @@ mod test {
         read_value: unsafe extern fn() -> u32,
         write_value: unsafe extern fn(u32),
         indirected_read: unsafe extern fn() -> u32,
+        // if a1 != 0 { a2 * 2 * a1 as u16 - global } else { a2 }
+        early_jump: unsafe extern fn(u32, u32) -> u32,
+        // Same but also if a1 & 0x8000_0000
+        early_jump_twice: unsafe extern fn(u32, u32) -> u32,
     }
 
     unsafe impl Sync for LoadedCode {}
@@ -46,6 +51,10 @@ mod test {
         assert_eq!((code.cmp_nonzero_byte)(), 0);
         assert_eq!((code.read_value)(), 0);
         assert_eq!((code.indirected_read)(), 0);
+        assert_eq!((code.early_jump)(0, 700), 700);
+        assert_eq!((code.early_jump)(250, 700), 350000);
+        assert_eq!((code.early_jump_twice)(0xc30c_c30c, 700), 700);
+        assert_eq!((code.early_jump_twice)(250, 700), 350000);
         (code.write_value)(7);
 
         assert_eq!(*(code.get_ref)(), 7);
@@ -53,6 +62,10 @@ mod test {
         assert_eq!((code.cmp_nonzero_byte)(), 1);
         assert_eq!((code.read_value)(), 7);
         assert_eq!((code.indirected_read)(), 7);
+        assert_eq!((code.early_jump)(0, 700), 700);
+        assert_eq!((code.early_jump)(250, 700), 350000 - 7);
+        assert_eq!((code.early_jump_twice)(0xc30c_c30c, 700), 700);
+        assert_eq!((code.early_jump_twice)(250, 700), 350000 - 7);
         (code.write_value)(0);
     }
 
@@ -75,6 +88,8 @@ mod test {
                 read_value: code_func(out, 3),
                 write_value: code_func(out, 4),
                 indirected_read: code_func(out, 5),
+                early_jump: code_func(out, 6),
+                early_jump_twice: code_func(out, 7),
             };
             verify_code(&result);
             result
@@ -252,6 +267,108 @@ mod test {
             assert_eq!(*(code.get_ref)(), 99 * 8);
             assert_eq!((code.read_value)(), 99 * 8);
             assert_eq!((code.cmp_nonzero)(), 1);
+        }
+    }
+
+    #[test]
+    fn early_jump_in_hook_single() {
+        unsafe {
+            let code = load_code();
+
+            let mut patcher = Patcher::new();
+            let mut patch = patcher.patch_memory(
+                code.base as *mut _,
+                code.base as *mut _,
+                code.base as usize,
+            );
+            patch.hook_closure_address(BinaryFunc, move |a, b, orig| {
+                orig(a - 1, b - 2)
+            }, code.early_jump as usize - code.base as usize);
+            (code.write_value)(6);
+            assert_eq!((code.early_jump)(4, 4), (4 - 1) * 2 * (4 - 2) - 6);
+            assert_eq!((code.early_jump)(7, 7), (7 - 1) * 2 * (7 - 2) - 6);
+            assert_eq!((code.early_jump)(1, 2), 2 - 2);
+            assert_eq!((code.early_jump)(1, 6), 6 - 2);
+        }
+    }
+
+    #[test]
+    fn early_jump_in_hook_multiple() {
+        unsafe {
+            let code = load_code();
+
+            let mut patcher = Patcher::new();
+            for _ in 0..3 {
+                let mut patch = patcher.patch_memory(
+                    code.base as *mut _,
+                    code.base as *mut _,
+                    code.base as usize,
+                );
+                patch.hook_closure_address(BinaryFunc, move |a, b, orig| {
+                    orig(a - 1, b - 2)
+                }, code.early_jump as usize - code.base as usize);
+            }
+            (code.write_value)(6);
+            assert_eq!((code.early_jump)(40, 40), (40 - 3) * 2 * (40 - 6) - 6);
+            assert_eq!((code.early_jump)(7, 7), (7 - 3) * 2 * (7 - 6) - 6);
+            assert_eq!((code.early_jump)(3, 9), 9 - 6);
+            assert_eq!((code.early_jump)(3, 6), 6 - 6);
+        }
+    }
+
+    #[test]
+    fn early_jump_twice_in_hook_single() {
+        unsafe {
+            let code = load_code();
+
+            let mut patcher = Patcher::new();
+            let mut patch = patcher.patch_memory(
+                code.base as *mut _,
+                code.base as *mut _,
+                code.base as usize,
+            );
+            patch.hook_closure_address(BinaryFunc, move |a, b, orig| {
+                orig(a - 1, b - 2)
+            }, code.early_jump_twice as usize - code.base as usize);
+            (code.write_value)(6);
+            assert_eq!((code.early_jump_twice)(4, 4), (4 - 1) * 2 * (4 - 2) - 6);
+            assert_eq!((code.early_jump_twice)(7, 7), (7 - 1) * 2 * (7 - 2) - 6);
+            assert_eq!((code.early_jump_twice)(0xc000_0001, 2), 2 - 2);
+            assert_eq!((code.early_jump_twice)(0x8000_0001, 6), 6 - 2);
+            assert_eq!(
+                (code.early_jump_twice)(0x8000_0000, 6),
+                0xffffu32 * 2 * 4 - 6,
+            );
+        }
+    }
+
+    #[test]
+    fn early_jump_twice_in_hook_multiple() {
+        unsafe {
+            let code = load_code();
+
+            let mut patcher = Patcher::new();
+            for _ in 0..3 {
+                let mut patch = patcher.patch_memory(
+                    code.base as *mut _,
+                    code.base as *mut _,
+                    code.base as usize,
+                );
+                patch.hook_closure_address(BinaryFunc, move |a, b, orig| {
+                    orig(a - 1, b - 2)
+                }, code.early_jump_twice as usize - code.base as usize);
+            }
+            (code.write_value)(6);
+            assert_eq!((code.early_jump_twice)(40, 40), (40 - 3) * 2 * (40 - 6) - 6);
+            assert_eq!((code.early_jump_twice)(7, 7), (7 - 3) * 2 * (7 - 6) - 6);
+            assert_eq!((code.early_jump_twice)(3, 9), 9 - 6);
+            assert_eq!((code.early_jump_twice)(3, 6), 6 - 6);
+            assert_eq!((code.early_jump_twice)(0xc000_0001, 437), 437 - 6);
+            assert_eq!((code.early_jump_twice)(0x8000_0003, 40), 40 - 6);
+            assert_eq!(
+                (code.early_jump_twice)(0x8000_0001, 80),
+                0xfffeu32 * 2 * (80 - 6) - 6,
+            );
         }
     }
 }

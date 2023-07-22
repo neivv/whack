@@ -421,7 +421,7 @@ impl HookWrapAssembler {
             buffer.restore_registers(register_store_offset);
             buffer.stack_add(stack_reserve_size);
             unsafe {
-                let len = ins_len(orig, JUMP_INS_LEN);
+                let len = ins_len_for_copy(orig, JUMP_INS_LEN);
                 buffer.copy_instructions(orig, len);
                 buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
             }
@@ -447,14 +447,16 @@ impl HookWrapAssembler {
         buffer.reset_stack_offset();
         buffer.fixup_to_position(out_wrapper_pos);
         unsafe {
-            let len = ins_len(orig, JUMP_INS_LEN);
-            buffer.copy_instructions(orig, len);
+            let len = ins_len_for_copy(orig, JUMP_INS_LEN);
+            let widen_offset = buffer.copy_instructions(orig, len);
             // If the jump is included in instruction copy range,
             // it'll be automatically fixed to point to original
             // code as well when the wrapper is written to exec memory.
             // (Have it jump past last copied instruction -- so at start
             // of own instruction -- so rip - 5)
-            buffer.buf.extend_from_slice(&[0xe9, 0xfb, 0xff, 0xff, 0xff]);
+            let mut bytes = [0xe9, 0x00, 0x00, 0x00, 0x00];
+            LE::write_u32(&mut bytes[1..], 0xffff_fffbu32.wrapping_sub(widen_offset as u32));
+            buffer.buf.extend_from_slice(&bytes);
             buffer.instruction_ranges[0].len += 5;
         }
     }
@@ -472,7 +474,7 @@ impl HookWrapAssembler {
         let pop_size = self.write_out_wrapper_common(buffer, out_wrapper_pos);
         // Push return address manually
         unsafe {
-            let len = ins_len(orig, JUMP_INS_LEN);
+            let len = ins_len_for_copy(orig, JUMP_INS_LEN);
             let ret_address = buffer.fixup_position();
             buffer.push(AsmValue::Undecided);
             buffer.copy_instructions(orig, len);
@@ -675,7 +677,7 @@ impl HookWrapCode {
         heap: &mut ExecutableHeap,
         unwind_tables: &mut UnwindTables,
     ) -> GeneratedHook {
-        let ins_len = |x| { unsafe { ins_len(x, JUMP_INS_LEN) } };
+        let ins_len = |x| { unsafe { ins_len_for_copy(x, JUMP_INS_LEN) } };
 
         let entry_orig_ins_len = entry.map(&ins_len).unwrap_or(0);
 
@@ -686,7 +688,7 @@ impl HookWrapCode {
         unsafe {
             let near_range = self.buf.instruction_ranges.iter()
                 .filter(|x| !x.orig_base.is_null())
-                .map(|x| (x.orig_base, x.orig_base.add(x.len as usize)))
+                .map(|x| (x.orig_base, x.orig_base.add(x.orig_len as usize)))
                 .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
             let (allocator_base, data) = match near_range {
                 Some(s) => heap.allocate_near(s, wrapper_len),
@@ -770,7 +772,8 @@ pub struct AssemblerBuf {
 struct InstructionRange {
     orig_base: *const u8,
     buf_pos: u32,
-    len: u32,
+    len: u16,
+    orig_len: u16,
 }
 
 pub struct AsmFixupPos(usize);
@@ -785,6 +788,7 @@ impl AssemblerBuf {
             instruction_ranges: [InstructionRange {
                 orig_base: ptr::null(),
                 buf_pos: 0,
+                orig_len: 0,
                 len: 0,
             }],
         }
@@ -812,7 +816,8 @@ impl AssemblerBuf {
         }
     }
 
-    unsafe fn copy_instructions(&mut self, source: *const u8, amt: usize) {
+    /// Returns extra offset if the instructions were offset due to having to widen jumps.
+    unsafe fn copy_instructions(&mut self, source: *const u8, amt: usize) -> usize {
         let buf_pos = self.buf.len();
         copy_instructions(source, &mut self.buf, amt);
         let copy_len = self.buf.len() - buf_pos;
@@ -823,8 +828,11 @@ impl AssemblerBuf {
         self.instruction_ranges[0] = InstructionRange {
             orig_base: source,
             buf_pos: buf_pos as u32,
-            len: copy_len as u32,
+            orig_len: amt as u16,
+            len: copy_len as u16,
         };
+        let offset = copy_len.wrapping_sub(amt);
+        offset
     }
 
     fn write_fixups(&mut self) -> ConstOffsets {
@@ -849,6 +857,7 @@ impl AssemblerBuf {
             fixup_relative_instructions(
                 range.orig_base,
                 out.add(range.buf_pos as usize),
+                range.orig_len as usize,
                 range.len as usize,
             );
         }
@@ -1100,28 +1109,94 @@ unsafe fn copy_instructions(
     min_length: usize,
 ) {
     let mut left = min_length;
-    let mut copy_len = 0usize;
-    for (opcode, _) in lde::X64.iter(slice::from_raw_parts(src, min_length + 32), 0) {
-        if left == 0 {
-            break;
+    let mut total_copied = 0usize;
+    // This grows when having to widen 2-byte jumps to 5-byte jumps,
+    // after that all riprel instructions will be changed by that offset.
+    // (But still as if they were at located at `src`, not at `dst`
+    let mut dst_offset = 0usize;
+    let start = dst.len();
+    'outer: while left != 0 {
+        let src_pos = src.add(total_copied);
+        let mut copy_len = 0usize;
+        for (opcode, _) in lde::X64.iter(slice::from_raw_parts(src_pos, min_length + 32), 0) {
+            // Special case long jumps written by this library (jmp [rip])
+            let ins_len = if opcode[..] == [0xff, 0x25, 0x00, 0x00, 0x00, 0x00] {
+                JUMP_INS_LEN
+            } else {
+                opcode.len()
+            };
+            if opcode[0] == 0xeb || opcode[0] & 0xf0 == 0x70 {
+                // Short relative jump, widen to long jump unless inside min_size
+                let ins_end = total_copied + copy_len + 2;
+                let offset = opcode[1] as i8;
+                let dest = ins_end as isize + offset as isize;
+                if dest < 0 || (dest as usize) >= min_length {
+                    // Widen
+                    if copy_len != 0 {
+                        let slice = slice::from_raw_parts(src_pos, copy_len);
+                        dst.extend_from_slice(slice);
+                        if dst_offset != 0 {
+                            let dst_len = dst.len();
+                            let dst_ptr = dst.as_mut_ptr().add(dst_len).sub(slice.len());
+                            fixup_relative_instructions(
+                                dst_ptr.sub(dst_offset),
+                                dst_ptr,
+                                slice.len(),
+                                slice.len(),
+                            );
+                        }
+                    }
+                    if opcode[0] == 0xeb {
+                        let mut bytes = [0xe9, 0x00, 0x00, 0x00, 0x00];
+                        LE::write_i32(&mut bytes[1..], offset as i32 - dst_offset as i32 - 3);
+                        dst.extend_from_slice(&bytes);
+                        dst_offset += 3;
+                    } else {
+                        let mut bytes = [0x0f, 0x80 | (opcode[0] & 0xf), 0x00, 0x00, 0x00, 0x00];
+                        LE::write_i32(&mut bytes[2..], offset as i32 - dst_offset as i32 - 4);
+                        dst.extend_from_slice(&bytes);
+                        dst_offset += 4;
+                    }
+
+                    total_copied = ins_end;
+                    left = left.saturating_sub(2);
+                    continue 'outer;
+                }
+            }
+            copy_len += ins_len;
+            left = left.saturating_sub(ins_len);
+            if left == 0 {
+                break;
+            }
         }
-        // Special case long jumps written by this library (jmp [rip])
-        let ins_len = if opcode[..] == [0xff, 0x25, 0x00, 0x00, 0x00, 0x00] {
-            JUMP_INS_LEN
-        } else {
-            opcode.len()
-        };
-        copy_len += ins_len;
-        left = match left.checked_sub(ins_len) {
-            Some(s) => s,
-            None => break,
-        };
+        let slice = slice::from_raw_parts(src_pos, copy_len);
+        dst.extend_from_slice(slice);
+        if dst_offset != 0 {
+            let dst_len = dst.len();
+            let dst_ptr = dst.as_mut_ptr().add(dst_len).sub(slice.len());
+            fixup_relative_instructions(
+                dst_ptr.sub(dst_offset),
+                dst_ptr,
+                slice.len(),
+                slice.len(),
+            );
+        }
+        total_copied += copy_len;
     }
-    let slice = slice::from_raw_parts(src, copy_len);
-    dst.extend_from_slice(slice);
 }
 
 pub unsafe fn ins_len(ins: *const u8, min_length: usize) -> usize {
+    let mut sum = 0;
+    for (opcode, _) in lde::X64.iter(slice::from_raw_parts(ins, min_length + 32), 0) {
+        if sum >= min_length {
+            break;
+        }
+        sum += opcode.len();
+    }
+    sum
+}
+
+unsafe fn ins_len_for_copy(ins: *const u8, min_length: usize) -> usize {
     let mut sum = 0;
     for (opcode, _) in lde::X64.iter(slice::from_raw_parts(ins, min_length + 32), 0) {
         if sum >= min_length {
@@ -1140,6 +1215,7 @@ pub unsafe fn ins_len(ins: *const u8, min_length: usize) -> usize {
 unsafe fn fixup_relative_instructions(
     orig_base: *const u8,
     new_base: *mut u8,
+    orig_len: usize,
     len: usize,
 ) {
     let offset = (new_base as usize).wrapping_sub(orig_base as usize) as u32;
@@ -1170,7 +1246,7 @@ unsafe fn fixup_relative_instructions(
                     let old_val = rel.read_unaligned();
                     // Fixup only if not pointing to the copied code itself
                     if pos.wrapping_add(ins_len)
-                        .wrapping_add(old_val as i32 as isize as usize) >= len
+                        .wrapping_add(old_val as i32 as isize as usize) >= orig_len
                     {
                         rel.write_unaligned(old_val.wrapping_sub(offset));
                     }
@@ -1182,7 +1258,16 @@ unsafe fn fixup_relative_instructions(
                 rel.write_unaligned(rel.read_unaligned().wrapping_sub(offset));
             }
         }
-        pos += ins_len;
+        if ins_len == 6 &&
+            slice::from_raw_parts(ins_bytes, 6) == [0xff, 0x25, 0x00, 0x00, 0x00, 0x00]
+        {
+            // Special case long jumps written by this library (jmp [rip])
+            // As the constant afterwards may decode as an instruction that should
+            // not be fixed.
+            pos += JUMP_INS_LEN;
+        } else {
+            pos += ins_len;
+        }
     }
 }
 

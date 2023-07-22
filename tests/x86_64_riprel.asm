@@ -5,7 +5,7 @@ default rel
 
 base:
 ; Func count
-dd (get_ref - base - 8) / 4
+dd (funcs_end - base - 4) / 4
 ; Func offsets
 dd get_ref - base
 dd cmp_nonzero - base
@@ -13,6 +13,10 @@ dd cmp_nonzero_byte - base
 dd read_value - base
 dd write_value - base
 dd indirected_read - base
+dd early_short_jmp - base
+dd early_short_jmp_twice - base
+
+funcs_end:
 
 align 16
 get_ref:
@@ -46,6 +50,35 @@ ret
 align 16
 indirected_read:
 call read_value
+ret
+
+align 16
+early_short_jmp:
+test ecx, ecx
+je .end
+add edx, edx
+movzx ecx, cx
+imul edx, ecx
+call read_value
+sub edx, eax
+.end:
+mov eax, edx
+ret
+
+align 16
+early_short_jmp_twice:
+test ecx, ecx
+je .end
+js .end
+jmp .next
+.next:
+add edx, edx
+movzx ecx, cx
+imul edx, ecx
+call read_value
+sub edx, eax
+.end:
+mov eax, edx
 ret
 
 align 16
