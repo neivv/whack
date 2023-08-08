@@ -1114,7 +1114,6 @@ unsafe fn copy_instructions(
     // after that all riprel instructions will be changed by that offset.
     // (But still as if they were at located at `src`, not at `dst`
     let mut dst_offset = 0usize;
-    let start = dst.len();
     'outer: while left != 0 {
         let src_pos = src.add(total_copied);
         let mut copy_len = 0usize;
