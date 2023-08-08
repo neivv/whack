@@ -559,7 +559,7 @@ impl Patcher {
     pub unsafe fn enable_patch(&mut self, patch: &Patch) {
         let mut memprotect_guard = SmallVec::new();
         self.unprotect_patch_memory(&patch.0, &mut memprotect_guard);
-        self.enable_patch_internal(&patch.0)
+        self.enable_patch_internal(&patch.0);
     }
 
     unsafe fn enable_patch_internal(&mut self, patch: &PatchEnum) {

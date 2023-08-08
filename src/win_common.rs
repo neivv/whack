@@ -10,6 +10,7 @@ use winapi::shared::minwindef::HMODULE;
 use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::memoryapi::{VirtualProtect, VirtualQuery};
+use winapi::um::processthreadsapi::{FlushInstructionCache, GetCurrentProcess};
 use winapi::um::winnt::{self};
 
 use crate::Export;
@@ -110,8 +111,10 @@ impl Drop for MemoryProtection {
     fn drop(&mut self) {
         unsafe {
             let mut tmp = 0;
+            let process = GetCurrentProcess();
             for tp in &self.protections {
                 VirtualProtect(tp.0 as *mut _, tp.1, tp.2, &mut tmp);
+                FlushInstructionCache(process, tp.0 as *const _, tp.1);
             }
         }
     }
