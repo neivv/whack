@@ -361,8 +361,17 @@ impl HookWrapAssembler {
         let stack_args_amount = (self.args.len() + 2).max(4) << 3;
         let mut stack_reserve_amount = stack_args_amount;
         if is_non_replacing_hook {
-            // Reserve space for storing all registers except rsp
-            stack_reserve_amount += 15 * 8;
+            // Reserve space for storing all registers except rsp and rbp.
+            // rbp will be used as "frame pointer" to properly restore
+            // rsp regardless of alignment
+            stack_reserve_amount += 14 * 8;
+            buffer.buf.extend_from_slice(&[
+                0x55, // push rbp
+                0x48, 0x89, 0xe5, // mov rbp, rsp
+                0x48, 0x81, 0xe4, 0xf0, 0xff, 0xff, 0xff, // and rsp, ffff_ffff_ffff_fff0
+                0x48, 0x83, 0xec, 0x08, // sub rsp, 8 (Rest of the code assumes rsp like on
+                                        // function entry, so 8-misalign)
+            ]);
         }
         // | 8 to align stack correctly if it was not.
         let stack_reserve_size = stack_reserve_amount | 8;
@@ -420,6 +429,10 @@ impl HookWrapAssembler {
         if let Some(orig) = orig {
             buffer.restore_registers(register_store_offset);
             buffer.stack_add(stack_reserve_size);
+            buffer.buf.extend_from_slice(&[
+                0x48, 0x89, 0xec, // mov rsp, rbp
+                0x5d, // pop rbp
+            ]);
             unsafe {
                 let len = ins_len_for_copy(orig, JUMP_INS_LEN);
                 buffer.copy_instructions(orig, len);
@@ -914,7 +927,7 @@ impl AssemblerBuf {
     pub fn store_registers(&mut self, offset: usize) {
         let mut offset = offset;
         for i in 0..16 {
-            if i == 4 {
+            if i == 4 || i == 5 {
                 continue;
             }
             self.mov_to_stack(offset, AsmValue::Register(i));
@@ -925,7 +938,7 @@ impl AssemblerBuf {
     pub fn restore_registers(&mut self, offset: usize) {
         let mut offset = offset;
         for i in 0..16 {
-            if i == 4 {
+            if i == 4 || i == 5 {
                 continue;
             }
             if offset < 0x80 {

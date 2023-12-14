@@ -15,6 +15,8 @@ dd write_value - base
 dd indirected_read - base
 dd early_short_jmp - base
 dd early_short_jmp_twice - base
+dd with_stack_frame_entry
+dd with_stack_frame_hook_point
 
 funcs_end:
 
@@ -79,6 +81,25 @@ call read_value
 sub edx, eax
 .end:
 mov eax, edx
+ret
+
+align 16
+with_stack_frame_entry:
+push rbx
+push r14
+sub rsp, 0x88
+add rcx, rcx
+sub rcx, rdx
+add rdx, 0x5000
+mov rax, rdx
+with_stack_frame_hook_point:
+test rcx, rcx
+jne .end
+sub rax, 0x300
+.end:
+add rsp, 0x88
+pop r14
+pop rbx
 ret
 
 align 16

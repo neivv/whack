@@ -33,6 +33,8 @@ mod test {
         early_jump: unsafe extern fn(u32, u32) -> u32,
         // Same but also if a1 & 0x8000_0000
         early_jump_twice: unsafe extern fn(u32, u32) -> u32,
+        with_stack_frame_entry: unsafe extern fn(u32, u32) -> u32,
+        with_stack_frame_middle: unsafe extern fn() -> !,
     }
 
     unsafe impl Sync for LoadedCode {}
@@ -90,6 +92,8 @@ mod test {
                 indirected_read: code_func(out, 5),
                 early_jump: code_func(out, 6),
                 early_jump_twice: code_func(out, 7),
+                with_stack_frame_entry: code_func(out, 8),
+                with_stack_frame_middle: code_func(out, 9),
             };
             verify_code(&result);
             result
@@ -370,5 +374,73 @@ mod test {
                 0xfffeu32 * 2 * (80 - 6) - 6,
             );
         }
+    }
+
+    // Verify that call hook works regardless of rsp value
+    #[test]
+    fn call_hook_on_entry() {
+        unsafe {
+            let code = load_code();
+
+            let mut patcher = Patcher::new();
+            {
+                let mut patch = patcher.patch_memory(
+                    code.base as *mut _,
+                    code.base as *mut _,
+                    code.base as usize,
+                );
+                patch.call_hook_closure_address(BinaryFunc, move |a, b, _| {
+                    verify_rsp_align();
+                    assert_eq!(a, 0x500);
+                    assert_eq!(b, 0x900);
+                    0
+                }, code.with_stack_frame_entry as usize - code.base as usize);
+            }
+            assert_eq!((code.with_stack_frame_entry)(0x500, 0x900), 0x5900);
+        }
+    }
+
+    // Verify that call hook works regardless of rsp value, part 2
+    #[test]
+    fn call_hook_on_middle() {
+        unsafe {
+            let code = load_code();
+
+            let mut patcher = Patcher::new();
+            {
+                let mut patch = patcher.patch_memory(
+                    code.base as *mut _,
+                    code.base as *mut _,
+                    code.base as usize,
+                );
+                patch.call_hook_closure_address(BinaryFunc, move |a, b, _| {
+                    verify_rsp_align();
+                    assert_eq!(a, 0x100);
+                    assert_eq!(b, 0x5900);
+                    0
+                }, code.with_stack_frame_middle as usize - code.base as usize);
+            }
+            assert_eq!((code.with_stack_frame_entry)(0x500, 0x900), 0x5900);
+        }
+    }
+
+    unsafe fn verify_rsp_align() {
+        let out = VirtualAlloc(
+            null_mut(),
+            4096,
+            winnt::MEM_RESERVE | winnt::MEM_COMMIT,
+            winnt::PAGE_EXECUTE_READWRITE,
+        ) as *mut u8;
+        assert!(out.is_null() == false);
+        let data = [
+            0x48, 0x89, 0xe0, 0xc3, // mov rax, rsp; ret
+        ];
+        ptr::copy_nonoverlapping(data.as_ptr(), out, data.len());
+        let func: unsafe extern fn() -> usize = mem::transmute(out);
+        let rsp = func();
+        // Of course, if the program has made it this far with misaligned rsp,
+        // (Likely since the calling code isn't that complex)
+        // it'll crash at panicking code most likely
+        assert_eq!(rsp & 0xf, 0x8);
     }
 }
