@@ -10,7 +10,7 @@ pub struct Key(Arc<u32>);
 
 enum Entry<Value> {
     Empty,
-    Occupied(Key, Value),
+    Occupied(Value),
 }
 
 pub struct PatchMap<Value> {
@@ -29,7 +29,7 @@ impl<Value> PatchMap<Value> {
 
     pub fn insert(&mut self, val: Value) -> Key {
         let key = self.new_key();
-        self.active_entries[*key.0 as usize] = Entry::Occupied(key.clone(), val);
+        self.active_entries[*key.0 as usize] = Entry::Occupied(val);
         key
     }
 
@@ -48,14 +48,14 @@ impl<Value> PatchMap<Value> {
     pub fn get(&self, key: &Key) -> Option<&Value> {
         match self.active_entries[*key.0 as usize] {
             Entry::Empty => None,
-            Entry::Occupied(_, ref val) => Some(val),
+            Entry::Occupied(ref val) => Some(val),
         }
     }
 
     pub fn get_mut(&mut self, key: &Key) -> Option<&mut Value> {
         match self.active_entries[*key.0 as usize] {
             Entry::Empty => None,
-            Entry::Occupied(_, ref mut val) => Some(val),
+            Entry::Occupied(ref mut val) => Some(val),
         }
     }
 }
