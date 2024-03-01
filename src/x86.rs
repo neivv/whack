@@ -4,7 +4,6 @@ use std::mem;
 use std::ptr;
 use std::slice;
 
-use lde;
 use byteorder::{ByteOrder, LE};
 use smallvec::SmallVec;
 use winapi::um::heapapi::{HeapAlloc, HeapCreate};

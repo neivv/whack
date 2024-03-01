@@ -42,7 +42,7 @@ pub use crate::macros::{
 use std::{mem, ops, ptr};
 use std::borrow::Cow;
 use std::ffi::OsStr;
-use std::marker::{PhantomData, Sync};
+use std::marker::{PhantomData};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::os::raw::c_void;
