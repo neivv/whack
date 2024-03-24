@@ -1,3 +1,5 @@
+#![allow(clippy::identity_op, clippy::bool_comparison)]
+
 #[macro_use]
 #[cfg(target_arch = "x86_64")]
 extern crate whack;

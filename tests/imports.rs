@@ -22,8 +22,8 @@ whack_export!(pub extern "system" CloseHandle(HANDLE) -> BOOL);
 whack_export!(pub extern "system" GetProfileIntW(*const u16, *const u16, u32) -> u32);
 whack_export!(pub extern "system" GetTickCount() -> u32);
 
-thread_local!(static CLOSE_HANDLE_COUNT: Cell<u32> = Cell::new(0));
-thread_local!(static GET_PROFILE_INT_COUNT: Cell<u32> = Cell::new(0));
+thread_local!(static CLOSE_HANDLE_COUNT: Cell<u32> = const { Cell::new(0) });
+thread_local!(static GET_PROFILE_INT_COUNT: Cell<u32> = const { Cell::new(0) });
 
 unsafe fn close_handle_log(handle: HANDLE, orig: unsafe extern fn(HANDLE) -> BOOL) -> BOOL {
     CLOSE_HANDLE_COUNT.with(|x| x.set(x.get() + 1));
@@ -55,8 +55,8 @@ fn import_hooking() {
             let prev = copy.fetch_add(1, Ordering::SeqCst);
             let mut modified = vec![0; 1024];
             let mut pos = 0;
-            while *filename.offset(pos as isize) != 0 {
-                modified[pos] = *filename.offset(pos as isize);
+            while *filename.add(pos) != 0 {
+                modified[pos] = *filename.add(pos);
                 pos += 1;
             }
             modified[pos] = 0;

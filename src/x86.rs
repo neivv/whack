@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "cargo-clippy", allow(fn_to_numeric_cast))]
-
 use std::mem;
 use std::ptr;
 use std::slice;
@@ -150,7 +148,7 @@ impl HookWrapAssembler {
     }
 
     pub fn add_arg(&mut self, arg: Location) {
-        assert!(self.args.iter().find(|&&a| a == arg).is_none());
+        assert!(!self.args.iter().any(|&a| a == arg));
         self.args.push(arg);
     }
 
@@ -431,7 +429,6 @@ impl HookWrapCode {
     /// relative jumps don't work with (rather rare use case of) aliasing view patching.
     /// The original instructions will be copied to memory right before the wrapper,
     /// to be used when patch is disabled.
-    #[cfg_attr(feature = "cargo-clippy", allow(cast_ptr_alignment))]
     pub fn write_wrapper(
         &self,
         entry: Option<*const u8>,
@@ -452,7 +449,7 @@ impl HookWrapCode {
             entry_orig_ins_ptr.add(align(entry_orig_ins_len, 4))
         };
         let wrapper_end = unsafe {
-            wrapper.offset(align(self.buf.len(), 4) as isize)
+            wrapper.add(align(self.buf.len(), 4))
         };
         if let Some(entry) = entry {
             unsafe { ptr::copy_nonoverlapping(entry, entry_orig_ins_ptr, entry_orig_ins_len) };
@@ -460,8 +457,7 @@ impl HookWrapCode {
         self.buf.write(wrapper);
         if let Some(fixup) = import_fixup {
             unsafe {
-                let offset = self.import_fixup_offset as isize;
-                write_unaligned(wrapper.offset(offset), fixup as usize);
+                write_unaligned(wrapper.add(self.import_fixup_offset), fixup as usize);
             }
         }
         let entry_pointer_to_wrapper = unsafe {
@@ -539,7 +535,7 @@ impl AssemblerBuf {
             copy_instructions_ignore_shortjmp(&self.buf, out);
             for &fixup in self.fixups.iter() {
                 let prev = LE::read_u32(&self.buf[fixup..(fixup + 4)]);
-                write_unaligned(out.offset(fixup as isize), prev.wrapping_add(diff as u32));
+                write_unaligned(out.add(fixup), prev.wrapping_add(diff as u32));
             }
         }
     }
@@ -549,11 +545,11 @@ impl AssemblerBuf {
             AsmValue::Undecided => {
                 self.buf.push(0x68);
                 self.fixups.push(self.buf.len());
-                self.buf.extend_from_slice(&0u32.to_le_bytes());
+                self.buf.write_u32_le(0u32);
             }
             AsmValue::Constant(val) => {
                 self.buf.push(0x68);
-                self.buf.extend_from_slice(&(val as u32).to_le_bytes());
+                self.buf.write_u32_le(val);
             }
             AsmValue::Register(reg) => {
                 self.buf.push(0x50 + reg);
@@ -569,7 +565,7 @@ impl AssemblerBuf {
                     }
                     x => {
                         self.buf.extend_from_slice(&[0xff, 0xb4, 0xe4]);
-                        self.buf.extend_from_slice(&(x as u32).to_le_bytes());
+                        self.buf.write_u32_le(x as u32);
                     }
                 }
             }
@@ -616,7 +612,7 @@ impl AssemblerBuf {
                     }
                     x => {
                         self.buf.extend_from_slice(&[0x8b, 0x84 + to * 8, 0xe4]);
-                        self.buf.extend_from_slice(&(x as u32).to_le_bytes());
+                        self.buf.write_u32_le(x as u32);
                     }
                 }
             }
@@ -643,7 +639,7 @@ impl AssemblerBuf {
             }
             x => {
                 self.buf.extend_from_slice(&[0x81, byte2]);
-                self.buf.extend_from_slice(&(x as u32).to_le_bytes());
+                self.buf.write_u32_le(x as u32);
             }
         }
     }
@@ -730,29 +726,29 @@ unsafe fn copy_instructions_ignore_shortjmp(
         if len <= 0 {
             return;
         }
-        let ins_len = opcode.len() as isize;
+        let ins_len = opcode.len();
         // Relative jumps need to be handled differently
         match opcode[0] {
             0xf => match opcode[1] {
                 0x80 ..= 0x8f => {
                     ptr::copy_nonoverlapping(opcode.as_ptr(), dst, 6);
                     let diff = (dst as usize).wrapping_sub(opcode.as_ptr() as usize);
-                    let value = read_unaligned::<usize>(dst.offset(2));
-                    write_unaligned(dst.offset(2), value.wrapping_sub(diff));
+                    let value = read_unaligned::<usize>(dst.add(2));
+                    write_unaligned(dst.add(2), value.wrapping_sub(diff));
                 }
-                _ => ptr::copy_nonoverlapping(opcode.as_ptr(), dst, ins_len as usize),
+                _ => ptr::copy_nonoverlapping(opcode.as_ptr(), dst, ins_len),
             },
             0xe8 | 0xe9 => {
                 assert!(ins_len == 5);
                 ptr::copy_nonoverlapping(opcode.as_ptr(), dst, 5);
                 let diff = (dst as usize).wrapping_sub(opcode.as_ptr() as usize);
-                let value = read_unaligned::<usize>(dst.offset(1));
-                write_unaligned(dst.offset(1), value.wrapping_sub(diff));
+                let value = read_unaligned::<usize>(dst.add(1));
+                write_unaligned(dst.add(1), value.wrapping_sub(diff));
             }
-            _ => ptr::copy_nonoverlapping(opcode.as_ptr(), dst, ins_len as usize),
+            _ => ptr::copy_nonoverlapping(opcode.as_ptr(), dst, ins_len),
         }
-        dst = dst.offset(ins_len);
-        len -= ins_len;
+        dst = dst.add(ins_len);
+        len = len.saturating_sub_unsigned(ins_len);
     }
     if len != 0 {
         panic!("Could not disassemble {:02x?}", src);
@@ -784,7 +780,7 @@ unsafe fn copy_instructions(
                     dst.push(0xf);
                     dst.push(opcode[1]);
                     let offset = LE::read_u32(&opcode[2..6]);
-                    dst.extend_from_slice(&offset.wrapping_sub(diff as u32).to_le_bytes());
+                    dst.write_u32_le(offset.wrapping_sub(diff as u32));
                 }
                 _ => {
                     let slice = slice::from_raw_parts(opcode.as_ptr(), ins_len as usize);
@@ -798,14 +794,14 @@ unsafe fn copy_instructions(
                 let offset = opcode[1] as i8 as u32;
                 dst.push(0xf);
                 dst.push(opcode[0] + 0x10);
-                dst.extend_from_slice(&offset.wrapping_sub(diff as u32).to_le_bytes());
+                dst.write_u32_le(offset.wrapping_sub(diff as u32));
             }
             0xe8 | 0xe9 => {
                 assert!(ins_len == 5);
                 let diff = (dst_base as usize + dst.len()).wrapping_sub(opcode.as_ptr() as usize);
                 dst.push(opcode[0]);
                 let offset = LE::read_u32(&opcode[1..5]);
-                dst.extend_from_slice(&offset.wrapping_sub(diff as u32).to_le_bytes());
+                dst.write_u32_le(offset.wrapping_sub(diff as u32));
             }
             // Short jump
             0xeb => {
@@ -813,7 +809,7 @@ unsafe fn copy_instructions(
                     .wrapping_sub(opcode.as_ptr() as usize + 2);
                 let offset = opcode[1] as i8 as u32;
                 dst.push(0xe9);
-                dst.extend_from_slice(&offset.wrapping_sub(diff as u32).to_le_bytes());
+                dst.write_u32_le(offset.wrapping_sub(diff as u32));
             }
             _ => {
                 let slice = slice::from_raw_parts(opcode.as_ptr(), ins_len as usize);

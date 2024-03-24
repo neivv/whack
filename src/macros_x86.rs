@@ -29,6 +29,7 @@ macro_rules! whack_impl_addr_hook {
     {
         whack_maybe_pub_struct!($is_pub, $name);
         whack_hook_impl_private!(no, $stdcall, $name, $ret, $([$an @ $aloc($apos): $aty])*);
+        #[allow(clippy::unused_unit)]
         impl<T> $crate::AddressHookClosure<T> for $name
         where T: Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret + Sized + 'static,
         {
@@ -39,6 +40,7 @@ macro_rules! whack_impl_addr_hook {
             whack_hook_wrapper_impl!($ret, $([$aty])*);
         }
 
+        #[allow(clippy::unused_unit)]
         impl $crate::AddressHook for $name {
             fn wrapper_assembler(target: *const u8) -> $crate::platform::HookWrapAssembler {
                 $name::gen_wrap_private(target)
@@ -60,6 +62,7 @@ macro_rules! whack_impl_import_hook {
      $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
         whack_maybe_pub_struct!($is_pub, $name);
         whack_hook_impl_private!(yes, true, $name, $ret, $([$an @ $aloc($apos): $aty])*);
+        #[allow(clippy::unused_unit)]
         impl<T> $crate::ExportHookClosure<T> for $name
         where T: Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret + Sized + 'static,
         {
@@ -75,6 +78,7 @@ macro_rules! whack_impl_import_hook {
             whack_hook_wrapper_impl!($ret, $([$aty])*);
         }
 
+        #[allow(clippy::unused_unit)]
         impl $crate::ExportHook for $name {
             fn wrapper_assembler(target: *const u8) -> $crate::platform::HookWrapAssembler {
                 $name::gen_wrap_private(target)
@@ -89,6 +93,7 @@ macro_rules! whack_impl_import_hook {
 #[doc(hidden)]
 macro_rules! whack_hook_impl_private {
     ($fnptr_hook:ident, $stdcall:expr, $name:ident, $ret:ty, $([$an:ident @ $aloc:ident($apos:expr): $aty:ty])*) => {
+        #[allow(clippy::unused_unit)]
         impl $name {
             // caller -> assembly wrap -> in_wrap -> hook.
             // If the hook wishes to call original function,
@@ -123,7 +128,7 @@ macro_rules! whack_hook_wrapper_impl {
     ($ret:ty, $([$aty:ty])*) => {
         // Allowing this is slightly sketchy, relying on Vec's allocation alignment and
         // that sizeof(T) is aligned as well
-        #[cfg_attr(feature = "cargo-clippy", allow(cast_ptr_alignment))]
+        #[allow(clippy::unused_unit)]
         fn write_target_objects(target: T) -> Box<[u8]> {
             unsafe {
                 let fat_ptr_size = ::std::mem::size_of::<
@@ -132,7 +137,7 @@ macro_rules! whack_hook_wrapper_impl {
                 let size = ::std::mem::size_of::<T>() + fat_ptr_size;
                 let out = vec![0u8; size].into_boxed_slice();
 
-                let target_mem = out.as_ptr().offset(fat_ptr_size as isize) as *mut T;
+                let target_mem = out.as_ptr().add(fat_ptr_size) as *mut T;
                 ::std::ptr::write_unaligned(target_mem, target);
                 let target_ptr = target_mem;
                 ::std::ptr::write_unaligned(

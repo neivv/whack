@@ -96,8 +96,7 @@ impl MemoryProtection {
                     let address = mem_info.BaseAddress as *mut c_void;
                     protections.push((address, mem_info.RegionSize, mem_info.Protect));
                 }
-                let next = (mem_info.BaseAddress as *const u8)
-                    .offset(mem_info.RegionSize as isize);
+                let next = (mem_info.BaseAddress as *const u8).add(mem_info.RegionSize);
                 VirtualQuery(next as *const _, &mut mem_info, mem::size_of_val(&mem_info) as _);
             }
         }

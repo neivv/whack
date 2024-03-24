@@ -19,9 +19,9 @@ pub unsafe fn write_jump_to_ptr(from: *mut u8, to_ptr: *const *const u8) {
     // We don't use the pointer to pointer here since x86_64 has rip-relative jumps instead.
     // Could technically just have different arch-specific types, but too lazy for that right now.
     *from = 0xff;
-    *from.offset(1) = 0x25;
-    write_unaligned(from.offset(2), 0u32);
-    write_unaligned(from.offset(6), *to_ptr);
+    *from.add(1) = 0x25;
+    write_unaligned(from.add(2), 0u32);
+    write_unaligned(from.add(6), *to_ptr);
 }
 
 pub struct ExecutableHeap {
@@ -277,7 +277,7 @@ impl HookWrapAssembler {
     }
 
     pub fn add_arg(&mut self, arg: Location) {
-        assert!(self.args.iter().find(|&&a| a == arg).is_none());
+        assert!(!self.args.iter().any(|&a| a == arg));
         self.args.push(arg);
     }
 
@@ -682,7 +682,6 @@ impl HookWrapCode {
     ///
     /// The original instructions will be copied to memory right before the wrapper,
     /// to be used when patch is disabled.
-    #[cfg_attr(feature = "cargo-clippy", allow(cast_ptr_alignment))]
     fn write_wrapper(
         &self,
         entry: Option<*const u8>,
@@ -851,7 +850,7 @@ impl AssemblerBuf {
         let const_offset_begin = self.buf.len() + self.fixups.len() * 8;
         for &(fixup, value) in self.fixups.iter().chain(self.constants.iter()) {
             let offset = self.buf.len() - fixup - 4;
-            self.buf.extend_from_slice(&(value as u64).to_le_bytes());
+            self.buf.write_u64_le(value);
             LE::write_u32(&mut self.buf[fixup..(fixup + 4)], offset as u32);
         }
         self.align(16);
@@ -863,7 +862,7 @@ impl AssemblerBuf {
         ptr::copy_nonoverlapping(self.buf.as_ptr(), out, self.buf.len());
         for &(fixup, value) in self.fixups.iter() {
             let value_pos = fixup + 4 + LE::read_u32(&self.buf[fixup..(fixup + 4)]) as usize;
-            write_unaligned(out.offset(value_pos as isize), value.wrapping_add(diff as u64));
+            write_unaligned(out.add(value_pos), value.wrapping_add(diff as u64));
         }
         for range in self.instruction_ranges.iter().filter(|x| !x.orig_base.is_null()) {
             fixup_relative_instructions(
@@ -902,7 +901,7 @@ impl AssemblerBuf {
                     }
                     x => {
                         self.buf.extend_from_slice(&[0xff, 0xb4, 0xe4]);
-                        self.buf.extend_from_slice(&(x as u32).to_le_bytes());
+                        self.buf.write_u32_le(x as u32);
                     }
                 }
             }
@@ -985,7 +984,7 @@ impl AssemblerBuf {
                     }
                     x => {
                         self.buf.extend_from_slice(&[0x8b, 0x84 + (to & 7) * 8, 0xe4]);
-                        self.buf.extend_from_slice(&(x as u32).to_le_bytes());
+                        self.buf.write_u32_le(x as u32);
                     }
                 }
             }
@@ -1048,7 +1047,7 @@ impl AssemblerBuf {
             }
             x => {
                 self.buf.extend_from_slice(&[0x48, 0x81, 0xc4]);
-                self.buf.extend_from_slice(&(x as u32).to_le_bytes());
+                self.buf.write_u32_le(x as u32);
             }
         }
         self.stack_offset -= value as i32;
@@ -1062,7 +1061,7 @@ impl AssemblerBuf {
             }
             x => {
                 self.buf.extend_from_slice(&[0x48, 0x81, 0xec]);
-                self.buf.extend_from_slice(&(x as u32).to_le_bytes());
+                self.buf.write_u32_le(x as u32);
             }
         }
         self.stack_offset += value as i32;

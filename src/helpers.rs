@@ -16,6 +16,25 @@ pub fn align(val: usize, to: usize) -> usize {
     val + ((to - (val & mask)) & mask)
 }
 
+pub trait VecExt {
+    fn write_u32_le(&mut self, value: u32);
+    #[cfg(target_arch = "x86_64")]
+    fn write_u64_le(&mut self, value: u64);
+}
+
+impl VecExt for Vec<u8> {
+    #[inline]
+    fn write_u32_le(&mut self, value: u32) {
+        self.extend_from_slice(&value.to_le_bytes());
+    }
+
+    #[inline]
+    #[cfg(target_arch = "x86_64")]
+    fn write_u64_le(&mut self, value: u64) {
+        self.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
 #[test]
 fn test_align() {
     assert_eq!(align(0, 4), 0);

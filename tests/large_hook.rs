@@ -1,3 +1,5 @@
+#![allow(clippy::cmp_null)]
+
 #[macro_use]
 extern crate whack;
 extern crate winapi;

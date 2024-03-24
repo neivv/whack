@@ -19,7 +19,7 @@ pub unsafe fn import_ptr(
     let lookups;
     let addresses;
 
-    'outer: loop {
+    'outer: {
         let mut pos = 0;
         while pos + 0x14 <= size {
             let name_offset = read_at::<u32>(imps + pos as usize + 0xc) as usize;

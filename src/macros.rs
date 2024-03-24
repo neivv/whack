@@ -205,7 +205,9 @@ macro_rules! whack_address_hook {
 #[doc(hidden)]
 macro_rules! whack_addr_hook_common {
     ($ret:ty, [$($aty:ty),*], [$($an:ident),*]) => {
+        #[allow(clippy::unused_unit)]
         type Fnptr = unsafe fn($($aty),*) -> $ret;
+        #[allow(clippy::unused_unit)]
         type OptFnptr = unsafe fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret;
         unsafe fn hook(self, patch: &mut $crate::ModulePatcher, val: Self::Fnptr) -> $crate::Patch
         {
@@ -270,7 +272,9 @@ macro_rules! whack_addr_hook_common {
 #[doc(hidden)]
 macro_rules! whack_export_hook_common {
     ($ret:ty, [$($aty:ty),*], [$($an:ident),*]) => {
+        #[allow(clippy::unused_unit)]
         type Fnptr = unsafe fn($($aty),*) -> $ret;
+        #[allow(clippy::unused_unit)]
         type OptFnptr = unsafe fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret;
         unsafe fn import(
             self,
@@ -511,7 +515,7 @@ macro_rules! whack_fn {
 #[doc(hidden)]
 macro_rules! whack_fndecl {
     ($name:ident, $ret:ty, $([$args:ty])*) => {
-        #[allow(non_upper_case_globals)]
+        #[allow(non_upper_case_globals, clippy::unused_unit)]
         pub static mut $name: $crate::Func<extern fn($($args),*) -> $ret> =
             $crate::Func(::std::sync::atomic::AtomicUsize::new(0), ::std::marker::PhantomData);
     };
