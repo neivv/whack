@@ -561,8 +561,7 @@ impl Patcher {
 
     /// Disables a patch which has been created with this `Patcher`.
     pub unsafe fn disable_patch(&mut self, patch: &Patch) {
-        let mut memprotect_guard = SmallVec::new();
-        self.unprotect_patch_memory(&patch.0, &mut memprotect_guard);
+        let _memprotect_guard = self.unprotect_patch_memory(&patch.0);
         self.disable_patch_internal(&patch.0)
     }
 
@@ -594,8 +593,7 @@ impl Patcher {
     /// If the patch modifies a dll that gets loaded after the the patch was created,
     /// this function has to be called to actually patch the dll.
     pub unsafe fn enable_patch(&mut self, patch: &Patch) {
-        let mut memprotect_guard = SmallVec::new();
-        self.unprotect_patch_memory(&patch.0, &mut memprotect_guard);
+        let _memprotect_guard = self.unprotect_patch_memory(&patch.0);
         self.enable_patch_internal(&patch.0);
     }
 
@@ -625,44 +623,18 @@ impl Patcher {
         }
     }
 
-    fn unprotect_patch_memory(
-        &self,
-        patch: &PatchEnum,
-        protections: &mut SmallVec<[(platform::LibraryHandle, platform::MemoryProtection); 16]>,
-    )
-    {
-        let add_handle_if_needed = |
-            protections: &mut SmallVec<[(
-                platform::LibraryHandle,
-                platform::MemoryProtection,
-            ); 16]>,
-            handle
-        | {
-            if !protections.iter().any(|&(x, _)| x == handle) {
-                let protection = platform::MemoryProtection::new(handle);
-                protections.push((handle, protection));
-            }
+    fn unprotect_patch_memory(&self, patch: &PatchEnum) -> Option<platform::MemoryProtection> {
+        let image_base = match *patch {
+            PatchEnum::Regular(ref key) => self.patches.get(key).map(|x| &x.image_base),
+            PatchEnum::Group(ref key) => self.patch_groups.get(key).map(|x| &x.image_base),
         };
-        match *patch {
-            PatchEnum::Regular(ref key) => {
-                if let Some(handles) = self.patches.get(key)
-                    .and_then(|p| match p.image_base {
-                        ImageBase::Memory { .. } => None,
-                        _ => image_base_to_handles_opt(&p.image_base)
-                    }) {
-                    add_handle_if_needed(protections, handles.write);
-                }
-            }
-            PatchEnum::Group(ref key) => {
-                if let Some(handles) = self.patch_groups.get(key)
-                    .and_then(|p| match p.image_base {
-                        ImageBase::Memory { .. } => None,
-                        _ => image_base_to_handles_opt(&p.image_base)
-                    }) {
-                    add_handle_if_needed(protections, handles.write);
-                }
-            }
-        }
+        image_base.and_then(|image_base| {
+            let handles = match image_base {
+                ImageBase::Memory { .. } => return None,
+                _ => image_base_to_handles_opt(image_base)?,
+            };
+            Some(platform::MemoryProtection::new(handles.write))
+        })
     }
 }
 
@@ -813,8 +785,15 @@ impl<'b> ModulePatcher<'b> {
     ///
     /// `address` uses the expected base which was specified when creating this `ModulePatcher`.
     pub unsafe fn nop(&mut self, address: usize, length: usize) -> Patch {
-        use std::iter::repeat;
-        let nops: SmallVec<[u8; 16]> = repeat(platform::nop()).take(length).collect();
+        let buf;
+        let arr;
+        let nops = if length < 16 {
+            arr = [0x90; 16];
+            &arr[..length]
+        } else {
+            buf = vec![platform::nop(); length];
+            &buf[..]
+        };
         self.replace(address, &nops)
     }
 
