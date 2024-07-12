@@ -118,12 +118,16 @@ macro_rules! whack_hook_impl_private {
             fn gen_wrap_private<F>(target: *const u8) -> $crate::platform::HookWrapAssembler
             where F: Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret + Sized + 'static,
             {
+                static WRAP_ARGS: &[$crate::platform::Location] =
+                    whack_hook_initialize_wrapper!(init, [$($aloc, $apos;)*]);
                 let in_wrap_addr = $name::in_wrap::<F> as *const u8;
                 // TODO? Currently stdcall == false
-                let mut wrapper =
-                    $crate::platform::HookWrapAssembler::new(in_wrap_addr, target, false);
-                whack_hook_initialize_wrapper!(wrapper, [$($aloc, $apos),*]);
-                wrapper
+                $crate::platform::HookWrapAssembler::new(
+                    in_wrap_addr,
+                    target,
+                    false,
+                    WRAP_ARGS,
+                )
             }
         }
     }
@@ -142,17 +146,17 @@ macro_rules! whack_hook_wrapper_impl {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! whack_hook_initialize_wrapper {
-    ($wrapper:expr, [stack, $next_pos:expr $(,$aloc:ident, $apos:expr)*]) => {{
-        $wrapper.add_arg($crate::platform::Location::Stack($next_pos));
-        whack_hook_initialize_wrapper!($wrapper, [$($aloc, $apos),*]);
-    }};
-    ($wrapper:expr, [$next:ident, $next_pos:expr $(,$aloc:ident, $apos:expr)*]) => {{
-        let reg_id = whack_reg_id!($next);
-        $wrapper.add_arg($crate::platform::Location::Register(reg_id));
-        whack_hook_initialize_wrapper!($wrapper, [$($aloc, $apos),*]);
-    }};
-    ($wrapper:expr, []) => {
-    }
+    (init, [$($next:ident, $next_pos:expr;)*]) => {
+        &[
+            $(whack_hook_initialize_wrapper!(arg, $next, $next_pos)),*
+        ]
+    };
+    (arg, stack, $next_pos:expr) => {
+        $crate::platform::Location::Stack($next_pos)
+    };
+    (arg, $next:ident, $next_pos:expr) => {
+        $crate::platform::Location::Register(whack_reg_id!($next))
+    };
 }
 
 #[macro_export]

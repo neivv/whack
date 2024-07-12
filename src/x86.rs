@@ -3,7 +3,6 @@ use std::ptr;
 use std::slice;
 
 use byteorder::{ByteOrder, LE};
-use smallvec::SmallVec;
 use winapi::um::heapapi::{HeapAlloc, HeapCreate};
 use winapi::um::winnt::{self, HANDLE};
 
@@ -71,7 +70,7 @@ fn is_preserved_reg(reg: u8) -> bool {
 pub struct HookWrapAssembler {
     rust_in_wrapper: *const u8,
     target: *const u8,
-    args: SmallVec<[Location; 8]>,
+    args: &'static [Location],
     stdcall: bool,
 }
 
@@ -80,8 +79,8 @@ pub struct FuncAssembler {
     // (signature_pos, stack_pos)
     // e.g. fn(@stack(2) i32, @eax i32, @ecx i32, @stack(1) i32)
     // would have (0, 2), (3, 1).
-    current_stack: SmallVec<[(u8, u8); 8]>,
-    preserved_regs: SmallVec<[u8; 8]>,
+    current_stack: Vec<(u8, u8)>,
+    preserved_regs: Vec<u8>,
     arg_num: u8,
     func_offsets: Vec<usize>,
     offset_pos: usize,
@@ -137,19 +136,18 @@ impl AsmValue {
 }
 
 impl HookWrapAssembler {
-    pub fn new(rust_in_wrapper: *const u8, target: *const u8, stdcall: bool) -> HookWrapAssembler
-    {
+    pub fn new(
+        rust_in_wrapper: *const u8,
+        target: *const u8,
+        stdcall: bool,
+        args: &'static [Location],
+    ) -> HookWrapAssembler {
         HookWrapAssembler {
             rust_in_wrapper,
             stdcall,
             target,
-            args: SmallVec::new(),
+            args,
         }
-    }
-
-    pub fn add_arg(&mut self, arg: Location) {
-        assert!(!self.args.iter().any(|&a| a == arg));
-        self.args.push(arg);
     }
 
     pub fn generate_and_write_wrapper(
@@ -283,7 +281,7 @@ impl HookWrapAssembler {
         }
         // Push stack args.
         // Takes possible empty spots into account, so it became kind of complicated.
-        let mut stack_args: SmallVec<[_; 8]> = self.args
+        let mut stack_args: Vec<_> = self.args
             .iter()
             .enumerate()
             .filter_map(|(pos, x)| x.stack_to_opt().map(|x| (pos, x)))
@@ -341,8 +339,8 @@ impl FuncAssembler {
     pub fn new() -> FuncAssembler {
         FuncAssembler {
             buf: AssemblerBuf::new(),
-            current_stack: SmallVec::new(),
-            preserved_regs: SmallVec::new(),
+            current_stack: Vec::new(),
+            preserved_regs: Vec::new(),
             arg_num: 0,
             func_offsets: Vec::with_capacity(64),
             offset_pos: 0,
@@ -486,7 +484,7 @@ impl HookWrapCode {
 
 struct AssemblerBuf {
     buf: Vec<u8>,
-    fixups: SmallVec<[usize; 8]>,
+    fixups: Vec<usize>,
     // Import hooks
     stack_offset: i32,
 }
@@ -499,7 +497,7 @@ impl AssemblerBuf {
         AssemblerBuf {
             // TODO INSTRUCTION COPYING BREAKS IF THE VECTOR IS REALLOCATED
             buf: Vec::with_capacity(512),
-            fixups: SmallVec::new(),
+            fixups: Vec::new(),
             stack_offset: 0,
         }
     }

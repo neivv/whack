@@ -3,7 +3,6 @@ use std::ptr;
 use std::slice;
 
 use byteorder::{ByteOrder, LE};
-use smallvec::SmallVec;
 use winapi::um::winnt::{RtlAddFunctionTable, RtlDeleteFunctionTable, RUNTIME_FUNCTION};
 
 use crate::helpers::*;
@@ -184,7 +183,7 @@ fn is_preserved_reg(reg: u8) -> bool {
 pub struct HookWrapAssembler {
     rust_in_wrapper: *const u8,
     target: *const u8,
-    args: SmallVec<[Location; 8]>,
+    args: &'static [Location],
     stdcall: bool,
 }
 
@@ -193,8 +192,8 @@ pub struct FuncAssembler {
     // (signature_pos, stack_pos)
     // e.g. fn(@stack(2) i32, @eax i32, @ecx i32, @stack(1) i32)
     // would have (0, 2), (3, 1).
-    current_stack: SmallVec<[(u8, u8); 8]>,
-    preserved_regs: SmallVec<[u8; 8]>,
+    current_stack: Vec<(u8, u8)>,
+    preserved_regs: Vec<u8>,
     arg_num: u8,
     func_offsets: Vec<usize>,
     offset_pos: usize,
@@ -266,19 +265,18 @@ impl ConstOffsets {
 }
 
 impl HookWrapAssembler {
-    pub fn new(rust_in_wrapper: *const u8, target: *const u8, stdcall: bool) -> HookWrapAssembler
-    {
+    pub fn new(
+        rust_in_wrapper: *const u8,
+        target: *const u8,
+        stdcall: bool,
+        args: &'static [Location],
+    ) -> HookWrapAssembler {
         HookWrapAssembler {
             rust_in_wrapper,
             stdcall,
             target,
-            args: SmallVec::new(),
+            args,
         }
-    }
-
-    pub fn add_arg(&mut self, arg: Location) {
-        assert!(!self.args.iter().any(|&a| a == arg));
-        self.args.push(arg);
     }
 
     fn is_win64_calling_convention(&self) -> bool {
@@ -536,7 +534,7 @@ impl HookWrapAssembler {
         buffer.reset_stack_offset();
         buffer.fixup_to_position(out_wrapper_pos);
 
-        let mut stack_args: SmallVec<[_; 8]> = self.args
+        let mut stack_args: Vec<_> = self.args
             .iter()
             .enumerate()
             .filter_map(|(pos, x)| x.stack_to_opt().map(|x| (pos, x)))
@@ -604,8 +602,8 @@ impl FuncAssembler {
     pub fn new() -> FuncAssembler {
         FuncAssembler {
             buf: AssemblerBuf::new(),
-            current_stack: SmallVec::new(),
-            preserved_regs: SmallVec::new(),
+            current_stack: Vec::new(),
+            preserved_regs: Vec::new(),
             arg_num: 0,
             func_offsets: Vec::with_capacity(64),
             offset_pos: 0,
@@ -791,8 +789,8 @@ impl HookWrapCode {
 pub struct AssemblerBuf {
     buf: Vec<u8>,
     // Pos in buf, value
-    fixups: SmallVec<[(usize, u64); 4]>,
-    constants: SmallVec<[(usize, u64); 8]>,
+    fixups: Vec<(usize, u64)>,
+    constants: Vec<(usize, u64)>,
     stack_offset: i32,
     // Will need to copy instructions at most once per hook
     instruction_ranges: [InstructionRange; 1],
@@ -811,8 +809,8 @@ impl AssemblerBuf {
     pub fn new() -> AssemblerBuf {
         AssemblerBuf {
             buf: Vec::with_capacity(128),
-            fixups: SmallVec::new(),
-            constants: SmallVec::new(),
+            fixups: Vec::new(),
+            constants: Vec::new(),
             stack_offset: 0,
             instruction_ranges: [InstructionRange {
                 orig_base: ptr::null(),
