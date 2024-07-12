@@ -40,15 +40,15 @@ macro_rules! whack_impl_addr_hook {
                 ($addr as usize).checked_sub($base).unwrap()
             }
 
+            fn wrapper_assembler(target: *const u8) -> $crate::platform::HookWrapAssembler {
+                $name::gen_wrap_private::<T>(target)
+            }
+
             whack_hook_wrapper_impl!($ret, $([$aty])*);
         }
 
         #[allow(clippy::unused_unit)]
         impl $crate::AddressHook for $name {
-            fn wrapper_assembler(target: *const u8) -> $crate::platform::HookWrapAssembler {
-                $name::gen_wrap_private(target)
-            }
-
             whack_addr_hook_common!($ret, [$($aty),*], [$($an),*]);
         }
     };
@@ -78,15 +78,15 @@ macro_rules! whack_impl_import_hook {
                 }
             }
 
+            fn wrapper_assembler(target: *const u8) -> $crate::platform::HookWrapAssembler {
+                $name::gen_wrap_private::<T>(target)
+            }
+
             whack_hook_wrapper_impl!($ret, $([$aty])*);
         }
 
         #[allow(clippy::unused_unit)]
         impl $crate::ExportHook for $name {
-            fn wrapper_assembler(target: *const u8) -> $crate::platform::HookWrapAssembler {
-                $name::gen_wrap_private(target)
-            }
-
             whack_export_hook_common!($ret, [$($aty),*], [$($an),*]);
         }
     };
@@ -103,19 +103,22 @@ macro_rules! whack_hook_impl_private {
             // then it'll go hook -> out_wrap -> assembly -> original.
             // Orig is pointer to the assembly wrapper which calls original function,
             // Real is pointer to the fat pointer of hook Fn(...).
-            extern fn in_wrap(
+            extern fn in_wrap<F>(
                 $($an: $aty,)*
                 orig: extern fn($($aty),*) -> $ret,
-                real: *const *const dyn Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret,
-            ) -> $ret {
-                let real: &dyn Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret =
-                    unsafe { &**real };
+                real: *const F,
+            ) -> $ret
+            where F: Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret + Sized + 'static,
+            {
+                let real: &F = unsafe { &*real };
                 real($($an,)* orig)
             }
 
             #[allow(unused_mut)]
-            fn gen_wrap_private(target: *const u8) -> $crate::platform::HookWrapAssembler {
-                let in_wrap_addr = $name::in_wrap as *const u8;
+            fn gen_wrap_private<F>(target: *const u8) -> $crate::platform::HookWrapAssembler
+            where F: Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret + Sized + 'static,
+            {
+                let in_wrap_addr = $name::in_wrap::<F> as *const u8;
                 // TODO? Currently stdcall == false
                 let mut wrapper =
                     $crate::platform::HookWrapAssembler::new(in_wrap_addr, target, false);
@@ -130,28 +133,8 @@ macro_rules! whack_hook_impl_private {
 #[doc(hidden)]
 macro_rules! whack_hook_wrapper_impl {
     ($ret:ty, $([$aty:ty])*) => {
-        // Allowing this is slightly sketchy, relying on Vec's allocation alignment and
-        // that sizeof(T) is aligned as well
-        #[allow(clippy::unused_unit)]
-        fn write_target_objects(target: T) -> Box<[u8]> {
-            unsafe {
-                let fat_ptr_size = ::std::mem::size_of::<
-                    *const dyn Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret
-                >();
-                let size = ::std::mem::size_of::<T>() + fat_ptr_size;
-                let out = vec![0u8; size].into_boxed_slice();
-
-                let target_mem = out.as_ptr().add(fat_ptr_size) as *mut T;
-                ::std::ptr::write_unaligned(target_mem, target);
-                let target_ptr:
-                    *const dyn Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret = target_mem;
-                ::std::ptr::write_unaligned(
-                    out.as_ptr() as
-                        *mut *const dyn Fn($($aty,)* unsafe extern fn($($aty),*) -> $ret) -> $ret,
-                    target_ptr,
-                );
-                out
-            }
+        fn write_target_objects(target: T) -> $crate::TypeErasedBox {
+            Box::new(target).into()
         }
     }
 }

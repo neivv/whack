@@ -41,7 +41,7 @@ pub use crate::macros::{
     AddressHook, AddressHookClosure, ExportHook, ExportHookClosure, HookDecl, HookDeclClosure
 };
 
-use std::{mem, ops, ptr};
+use std::{alloc, mem, ops, ptr};
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::marker::{PhantomData};
@@ -59,7 +59,7 @@ struct ImportHook {
     wrapper_code: crate::platform::HookWrapCode,
     // This keeps the hook target alive as long as the hook exists.
     #[allow(dead_code)]
-    wrapper_target: Box<[u8]>,
+    wrapper_target: TypeErasedBox,
     stored_wrapper: *const u8,
     orig: *const u8,
 }
@@ -81,6 +81,41 @@ struct ReplacingPatch {
 }
 
 #[doc(hidden)]
+pub struct TypeErasedBox {
+    ptr: *mut u8,
+    layout: alloc::Layout,
+}
+
+impl TypeErasedBox {
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr as *const u8
+    }
+
+    pub fn leak(self) -> *const u8 {
+        let this = mem::ManuallyDrop::new(self);
+        this.ptr as *const u8
+    }
+}
+
+impl Drop for TypeErasedBox {
+    fn drop(&mut self) {
+        if self.layout.size() != 0 {
+            unsafe { alloc::dealloc(self.ptr, self.layout) }
+        }
+    }
+}
+
+impl<T> From<Box<T>> for TypeErasedBox {
+    fn from(x: Box<T>) -> Self {
+        let ptr = Box::into_raw(x);
+        TypeErasedBox {
+            ptr: ptr as *mut u8,
+            layout: alloc::Layout::new::<T>(),
+        }
+    }
+}
+
+#[doc(hidden)]
 pub struct GeneratedHook {
     pub wrapper: *const u8,
     /// Used for reverting the hook. Not related to the orig instruction
@@ -96,7 +131,7 @@ struct HookPatch {
     wrapper_code: platform::HookWrapAssembler,
     // This keeps the hook target alive as long as the hook exists.
     #[allow(dead_code)]
-    wrapper_target: Box<[u8]>,
+    wrapper_target: TypeErasedBox,
     entry: Option<GeneratedHook>,
     // Is this a replacing hook or just a detour
     ty: HookType,
@@ -684,7 +719,7 @@ impl<'b> ModulePatcher<'b> {
     unsafe fn add_hook_nongeneric(
         &mut self,
         ty: HookType,
-        target: Box<[u8]>,
+        target: TypeErasedBox,
         wrapper_assembler: platform::HookWrapAssembler,
     ) -> Patch {
         let mut variant = Box::new(HookPatch {

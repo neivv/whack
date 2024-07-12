@@ -358,40 +358,54 @@ impl HookWrapAssembler {
         // Reserve space for calling the rust in wrapper (args + 1 for out wrap + 1 for hook)
         // Always at least 4 for the x64 shadow space.
         let stack_args_amount = (self.args.len() + 2).max(4) << 3;
-        let mut stack_reserve_amount = stack_args_amount;
-        if is_non_replacing_hook {
-            // Reserve space for storing all registers except rsp and rbp.
-            // rbp will be used as "frame pointer" to properly restore
-            // rsp regardless of alignment
-            stack_reserve_amount += 14 * 8;
-            buffer.buf.extend_from_slice(&[
-                0x55, // push rbp
-                0x48, 0x89, 0xe5, // mov rbp, rsp
-                0x48, 0x81, 0xe4, 0xf0, 0xff, 0xff, 0xff, // and rsp, ffff_ffff_ffff_fff0
-                0x48, 0x83, 0xec, 0x08, // sub rsp, 8 (Rest of the code assumes rsp like on
-                                        // function entry, so 8-misalign)
-            ]);
-        }
-        // | 8 to align stack correctly if it was not.
-        let stack_reserve_size = stack_reserve_amount | 8;
+        // If no stack is needed, compile just a tail call
+        let need_stack_reserve = is_non_replacing_hook || self.args.len() > 2;
+
         let prolog_start = buffer.buf.len();
-        buffer.stack_sub(stack_reserve_size);
-        let prolog_end = buffer.buf.len();
-        // Adding just the stack sub as unwind info, should be enough
-        let unwind_info = [
-            0x01, // version = 1, flags = 0
-            (prolog_end - prolog_start) as u8, // Prolog size (4)
-            0x01, // Unwind code count (Just stack sub)
-            0x00, // No frame register
-            // Unwind codes
-            // Code 0 instruction end offset:
-            (prolog_end - prolog_start) as u8,
-            // Code 0 data:
-            // 2 = Small stack alloc, can represent 8 ~ 128 bytes
-            // Should check if it can fit but should never not fit.
-            0x2 | ((stack_reserve_size >> 3).wrapping_sub(1) << 4) as u8,
-            0x00, 0x00, // Align
-        ];
+        let unwind_info: &[u8];
+        let unwind_info_buf;
+        let stack_reserve_size;
+        if need_stack_reserve {
+            let mut stack_reserve_amount = stack_args_amount;
+            if is_non_replacing_hook {
+                // Reserve space for storing all registers except rsp and rbp.
+                // rbp will be used as "frame pointer" to properly restore
+                // rsp regardless of alignment
+                stack_reserve_amount += 14 * 8;
+                buffer.buf.extend_from_slice(&[
+                    0x55, // push rbp
+                    0x48, 0x89, 0xe5, // mov rbp, rsp
+                    0x48, 0x81, 0xe4, 0xf0, 0xff, 0xff, 0xff, // and rsp, ffff_ffff_ffff_fff0
+                    0x48, 0x83, 0xec, 0x08, // sub rsp, 8 (Rest of the code assumes rsp like on
+                                            // function entry, so 8-misalign)
+                ]);
+            }
+            // | 8 to align stack correctly if it was not.
+            stack_reserve_size = stack_reserve_amount | 8;
+
+            buffer.stack_sub(stack_reserve_size);
+
+            let prolog_end = buffer.buf.len();
+            // Adding just the stack sub as unwind info, should be enough
+            unwind_info_buf = [
+                0x01, // version = 1, flags = 0
+                (prolog_end - prolog_start) as u8, // Prolog size (4)
+                0x01, // Unwind code count (Just stack sub)
+                0x00, // No frame register
+                // Unwind codes
+                // Code 0 instruction end offset:
+                (prolog_end - prolog_start) as u8,
+                // Code 0 data:
+                // 2 = Small stack alloc, can represent 8 ~ 128 bytes
+                // Should check if it can fit but should never not fit.
+                0x2 | ((stack_reserve_size >> 3).wrapping_sub(1) << 4) as u8,
+                0x00, 0x00, // Align
+            ];
+            unwind_info = &unwind_info_buf[..];
+        } else {
+            stack_reserve_size = 0;
+            unwind_info = &[];
+        }
 
         // At offset past args
         let register_store_offset = stack_args_amount;
@@ -400,7 +414,7 @@ impl HookWrapAssembler {
         }
 
         let arg_registers = [1u8, 2, 8, 9];
-        // Target (hook dyn Fn pointer) param goes to second reg that isn't used or stack
+        // Target (hook Fn pointer) param goes to second reg that isn't used or stack
         let value = AsmValue::Constant(self.target as u64);
         let arg_idx = self.args.len() + 1;
         if let Some(&out_wrapper_arg_reg) = arg_registers.get(arg_idx) {
@@ -424,27 +438,31 @@ impl HookWrapAssembler {
                 buffer.mov_to_reg(reg, AsmValue::from_loc(arg));
             }
         }
-        buffer.call(AsmValue::Constant(self.rust_in_wrapper as u64));
-        if let Some(orig) = orig {
-            buffer.restore_registers(register_store_offset);
-            buffer.stack_add(stack_reserve_size);
-            buffer.buf.extend_from_slice(&[
-                0x48, 0x89, 0xec, // mov rsp, rbp
-                0x5d, // pop rbp
-            ]);
-            unsafe {
-                let len = ins_len_for_copy(orig, JUMP_INS_LEN);
-                buffer.copy_instructions(orig, len);
-                buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
+        if need_stack_reserve {
+            buffer.call(AsmValue::Constant(self.rust_in_wrapper as u64));
+            if let Some(orig) = orig {
+                buffer.restore_registers(register_store_offset);
+                buffer.stack_add(stack_reserve_size);
+                buffer.buf.extend_from_slice(&[
+                    0x48, 0x89, 0xec, // mov rsp, rbp
+                    0x5d, // pop rbp
+                ]);
+                unsafe {
+                    let len = ins_len_for_copy(orig, JUMP_INS_LEN);
+                    buffer.copy_instructions(orig, len);
+                    buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
+                }
+            } else {
+                buffer.stack_add(stack_reserve_size);
+                if self.stdcall {
+                    let stack_arg_count = self.args.iter().filter_map(|x| x.stack_to_opt()).count();
+                    buffer.ret(stack_arg_count * 8);
+                } else {
+                    buffer.ret(0);
+                }
             }
         } else {
-            buffer.stack_add(stack_reserve_size);
-            if self.stdcall {
-                let stack_arg_count = self.args.iter().filter_map(|x| x.stack_to_opt()).count();
-                buffer.ret(stack_arg_count * 8);
-            } else {
-                buffer.ret(0);
-            }
+            buffer.jump(AsmValue::Constant(self.rust_in_wrapper as u64));
         }
         (out_wrapper_pos, unwind_info.into())
     }

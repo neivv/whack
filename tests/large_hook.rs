@@ -1,4 +1,4 @@
-#![allow(clippy::cmp_null)]
+#![allow(clippy::cmp_null, clippy::missing_transmute_annotations)]
 
 #[macro_use]
 extern crate whack;

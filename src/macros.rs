@@ -2,14 +2,18 @@ use std::borrow::Cow;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::platform;
-use crate::{Patch, ModulePatcher};
+use crate::{TypeErasedBox, Patch, ModulePatcher};
 
 pub trait AddressHookClosure<Callback>: AddressHook {
     fn address() -> usize;
     /// Writes pointer to the closure object and the closure itself to memory, they obviously
     /// cannot be relocated afterwards. The boxed slice's beginning ptr is points to the
     /// closure pointer itself (It can be passed to HookWrapCode::write_wrapper).
-    fn write_target_objects(target: Callback) -> Box<[u8]>;
+    fn write_target_objects(target: Callback) -> TypeErasedBox;
+    /// Generates the wrapper code, which may be used multiple times.
+    ///
+    /// `target` must be kept alive as long as any of the wrappers generated exist.
+    fn wrapper_assembler(target: *const u8) -> platform::HookWrapAssembler;
 }
 
 pub trait AddressHook {
@@ -24,14 +28,10 @@ pub trait AddressHook {
         exec_heap: &mut platform::ExecutableHeap,
         unwind_tables: &mut platform::UnwindTables,
     ) -> *const u8;
-    /// Generates the wrapper code, which may be used multiple times.
-    ///
-    /// `target` must be kept alive as long as any of the wrappers generated exist.
-    fn wrapper_assembler(target: *const u8) -> platform::HookWrapAssembler;
 }
 
 pub trait HookDeclClosure<Callback>: HookDecl {
-    fn write_target_objects(target: Callback) -> Box<[u8]>;
+    fn write_target_objects(target: Callback) -> TypeErasedBox;
 }
 
 pub trait HookDecl {
@@ -41,7 +41,8 @@ pub trait HookDecl {
 
 pub trait ExportHookClosure<Callback>: ExportHook {
     fn default_export() -> crate::Export<'static>;
-    fn write_target_objects(target: Callback) -> Box<[u8]>;
+    fn write_target_objects(target: Callback) -> TypeErasedBox;
+    fn wrapper_assembler(target: *const u8) -> platform::HookWrapAssembler;
 }
 
 pub trait ExportHook {
@@ -59,7 +60,6 @@ pub trait ExportHook {
         dll: Cow<'static, [u8]>,
         val: Self::OptFnptr,
     ) -> Patch;
-    fn wrapper_assembler(target: *const u8) -> platform::HookWrapAssembler;
 }
 
 /// Declares a library import hook.
@@ -247,7 +247,7 @@ macro_rules! whack_addr_hook_common {
                 let target_closure = {
                     let data = H::write_target_objects(target);
                     // "Memory leak", should return (*const u8, Patch)
-                    unsafe { (*Box::into_raw(data)).as_ptr() }
+                    data.leak()
                 };
                 let entry = H::wrapper_assembler(target_closure)
                     .generate_and_write_wrapper(
