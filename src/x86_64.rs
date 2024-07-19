@@ -183,8 +183,9 @@ fn is_preserved_reg(reg: u8) -> bool {
 pub struct HookWrapAssembler {
     rust_in_wrapper: *const u8,
     target: *const u8,
-    args: &'static [Location],
-    stdcall: bool,
+    // Double reference to have construction (which is in generic function)
+    // be only single pointer move at cost of two pointer reads when accessing args
+    args: &'static &'static [Location],
 }
 
 pub struct FuncAssembler {
@@ -268,15 +269,18 @@ impl HookWrapAssembler {
     pub fn new(
         rust_in_wrapper: *const u8,
         target: *const u8,
-        stdcall: bool,
-        args: &'static [Location],
+        args: &'static &'static [Location],
     ) -> HookWrapAssembler {
         HookWrapAssembler {
             rust_in_wrapper,
-            stdcall,
             target,
             args,
         }
+    }
+
+    fn stdcall(&self) -> bool {
+        // Not implemented on x86-64
+        false
     }
 
     fn is_win64_calling_convention(&self) -> bool {
@@ -452,7 +456,7 @@ impl HookWrapAssembler {
                 }
             } else {
                 buffer.stack_add(stack_reserve_size);
-                if self.stdcall {
+                if self.stdcall() {
                     let stack_arg_count = self.args.iter().filter_map(|x| x.stack_to_opt()).count();
                     buffer.ret(stack_arg_count * 8);
                 } else {
@@ -585,7 +589,7 @@ impl HookWrapAssembler {
             buffer.mov_to_reg(val, src);
         }
         buffer.stack_sub(stack_args.first().map(|x| x.1 as usize).unwrap_or(0x4) * 8);
-        if self.stdcall {
+        if self.stdcall() {
             StackPopSize(align_size)
         } else {
             let stack_alloc_size = match stack_args.last() {
@@ -1055,31 +1059,28 @@ impl AssemblerBuf {
         }
     }
 
-    pub fn stack_add(&mut self, value: usize) {
+    fn stack_sub_add_ins(&mut self, value: usize, byte2: u8) {
+        let mut buf = [0x48, 0x83, byte2, 0, 0, 0, 0];
+        LE::write_u32(&mut buf[3..], value as u32);
         match value {
             0 => (),
             x if x < 0x80 => {
-                self.buf.extend_from_slice(&[0x48, 0x83, 0xc4, x as u8]);
+                self.buf.extend_from_slice(&buf[..4]);
             }
-            x => {
-                self.buf.extend_from_slice(&[0x48, 0x81, 0xc4]);
-                self.buf.write_u32_le(x as u32);
+            _ => {
+                buf[1] = 0x81;
+                self.buf.extend_from_slice(&buf);
             }
         }
+    }
+
+    pub fn stack_add(&mut self, value: usize) {
+        self.stack_sub_add_ins(value, 0xc4);
         self.stack_offset -= value as i32;
     }
 
     pub fn stack_sub(&mut self, value: usize) {
-        match value {
-            0 => (),
-            x if x < 0x80 => {
-                self.buf.extend_from_slice(&[0x48, 0x83, 0xec, x as u8]);
-            }
-            x => {
-                self.buf.extend_from_slice(&[0x48, 0x81, 0xec]);
-                self.buf.write_u32_le(x as u32);
-            }
-        }
+        self.stack_sub_add_ins(value, 0xec);
         self.stack_offset += value as i32;
     }
 

@@ -10,10 +10,11 @@ pub unsafe fn write_unaligned<T>(to: *mut u8, val: T) {
     ptr::write_unaligned(to as *mut T, val)
 }
 
+#[inline]
 pub fn align(val: usize, to: usize) -> usize {
-    let mask = to - 1;
+    let mask = to.wrapping_sub(1);
     assert!(mask & to == 0);
-    val + ((to - (val & mask)) & mask)
+    (val.wrapping_sub(1) | mask).wrapping_add(1)
 }
 
 pub trait VecExt {

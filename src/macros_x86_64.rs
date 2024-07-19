@@ -121,12 +121,10 @@ macro_rules! whack_hook_impl_private {
                 static WRAP_ARGS: &[$crate::platform::Location] =
                     whack_hook_initialize_wrapper!(init, [$($aloc, $apos;)*]);
                 let in_wrap_addr = $name::in_wrap::<F> as *const u8;
-                // TODO? Currently stdcall == false
                 $crate::platform::HookWrapAssembler::new(
                     in_wrap_addr,
                     target,
-                    false,
-                    WRAP_ARGS,
+                    &WRAP_ARGS,
                 )
             }
         }
