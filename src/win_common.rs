@@ -104,15 +104,16 @@ impl MemoryProtection {
                     GetLastError(),
                 );
             }
-            if mem_info.State != winnt::MEM_COMMIT {
-                panic!("Memory region from {start:p} was not commited");
-            }
             let init_type = mem_info.Type;
-            while mem_info.State == winnt::MEM_COMMIT && mem_info.Type == init_type {
-                let needs_unprotect = match mem_info.Protect {
-                    winnt::PAGE_EXECUTE_READ | winnt::PAGE_READONLY | winnt::PAGE_EXECUTE => true,
-                    _ => false,
-                };
+            while matches!(mem_info.State, winnt::MEM_COMMIT | winnt::MEM_RESERVE) &&
+                mem_info.Type == init_type
+            {
+                let needs_unprotect = mem_info.State == winnt::MEM_COMMIT &&
+                    match mem_info.Protect {
+                        winnt::PAGE_EXECUTE_READ | winnt::PAGE_READONLY |
+                            winnt::PAGE_EXECUTE => true,
+                        _ => false,
+                    };
                 if needs_unprotect {
                     let ok = VirtualProtect(
                         mem_info.BaseAddress,
