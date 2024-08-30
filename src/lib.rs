@@ -430,7 +430,9 @@ impl Patcher {
         let image_base = ImageBase::Executable;
         let patch_enable_handles = image_base_to_handles_opt(&image_base);
         let protection = patch_enable_handles.as_ref()
-            .map(|handles| platform::MemoryProtection::new(handles.write));
+            .map(|handles| unsafe {
+                platform::MemoryProtection::new_for_module(handles.write)
+            });
         ModulePatcher {
             parent: PatcherBorrow(self),
             patches: Vec::new(),
@@ -457,7 +459,9 @@ impl Patcher {
         let image_base = ImageBase::Library(Arc::new(platform::library_name(library)));
         let patch_enable_handles = image_base_to_handles_opt(&image_base);
         let protection = patch_enable_handles.as_ref()
-            .map(|handles| platform::MemoryProtection::new(handles.write));
+            .map(|handles| unsafe {
+                platform::MemoryProtection::new_for_module(handles.write)
+            });
         ModulePatcher {
             parent: PatcherBorrow(self),
             patches: Vec::new(),
@@ -474,7 +478,7 @@ impl Patcher {
     /// It is possible to use different addresses that are backed by same memory if other
     /// should be writable and other executable.
     ///
-    /// Unlike with `patch_exe` and `patch_library` memory is no unprotected automatically,
+    /// Unlike with `patch_exe` and `patch_library` memory is not unprotected automatically,
     /// the caller is responsible for taking care of the memory being writable.
     ///
     /// Call methods of the returned `ModulePatcher` to apply hooks.
@@ -633,7 +637,9 @@ impl Patcher {
                 ImageBase::Memory { .. } => return None,
                 _ => image_base_to_handles_opt(image_base)?,
             };
-            Some(platform::MemoryProtection::new(handles.write))
+            unsafe {
+                Some(platform::MemoryProtection::new_for_module(handles.write))
+            }
         })
     }
 }

@@ -66,18 +66,54 @@ pub struct MemoryProtection {
 }
 
 impl MemoryProtection {
-    pub fn new(start: HMODULE) -> MemoryProtection {
-        // This currently may go over to the next module if they are next to each other..
-        // Should have min and max addresses instead.
+    pub unsafe fn new(start: HMODULE) -> MemoryProtection {
+        Self::new_main(start as *const u8, usize::MAX)
+    }
+
+    pub unsafe fn new_for_module(start: HMODULE) -> MemoryProtection {
+        Self::new_main(start as *const u8, module_max_address(start as *const u8))
+    }
+
+    /// If the module's end is known, max_address should be provided, otherwise
+    /// it can be usize::MAX.
+    /// Unprotects range of committed pages with equivalent type but possibly different
+    /// protections until noncommitted page or max_address is reached.
+    /// I.e. will not unprotect two separate memory regions with unmapped memory in between,
+    /// no matter what max_address is given.
+    fn new_main(start: *const u8, max_address: usize) -> MemoryProtection {
         let start = start as *const _;
         let mut protections = Vec::new();
+        if start as usize >= max_address {
+            return MemoryProtection {
+                protections,
+            };
+        }
         unsafe {
             let mut mem_info: winnt::MEMORY_BASIC_INFORMATION = mem::zeroed();
+            let mem_info_size = mem::size_of::<winnt::MEMORY_BASIC_INFORMATION>();
             let mut tmp = 0;
-            VirtualQuery(start, &mut mem_info, mem::size_of_val(&mem_info) as _);
+            // VirtualQuery returns amount of bytes actually written to MEMORY_BASIC_INFORMATION
+            // parameter; So leaving out room for growing the parameter in future.
+            // It probably is never grown and the last field there is Type which is needed
+            // here, so as long as the struct definition on Rust side does not grow
+            // this won't need do any tedious `offsetof(Type) + 4` stuff.
+            let buf_size = VirtualQuery(start, &mut mem_info, mem_info_size);
+            if buf_size < mem_info_size {
+                panic!(
+                    "Couldn't VirtualQuery memory {start:p}: {buf_size:x}/{:08x}",
+                    GetLastError(),
+                );
+            }
+            if mem_info.State != winnt::MEM_COMMIT {
+                panic!("Memory region from {start:p} was not commited");
+            }
             let init_type = mem_info.Type;
-            while mem_info.Type == init_type {
-                if mem_info.State == winnt::MEM_COMMIT {
+            while mem_info.State == winnt::MEM_COMMIT && mem_info.Type == init_type {
+                let needs_unprotect = match mem_info.Protect {
+                    winnt::PAGE_EXECUTE_READ | winnt::PAGE_READONLY | winnt::PAGE_EXECUTE => true,
+                    _ => false,
+                };
+                if needs_unprotect {
                     let ok = VirtualProtect(
                         mem_info.BaseAddress,
                         mem_info.RegionSize,
@@ -96,14 +132,43 @@ impl MemoryProtection {
                     let address = mem_info.BaseAddress as *mut c_void;
                     protections.push((address, mem_info.RegionSize, mem_info.Protect));
                 }
+
                 let next = (mem_info.BaseAddress as *const u8).add(mem_info.RegionSize);
-                VirtualQuery(next as *const _, &mut mem_info, mem::size_of_val(&mem_info) as _);
+                if next as usize >= max_address {
+                    break;
+                }
+                let buf_size = VirtualQuery(next as *const _, &mut mem_info, mem_info_size);
+                if buf_size < mem_info_size {
+                    panic!(
+                        "Couldn't VirtualQuery memory {next:p}: {buf_size:x}/{:08x}",
+                        GetLastError(),
+                    );
+                }
             }
         }
         MemoryProtection {
             protections,
         }
     }
+}
+
+unsafe fn module_max_address(base: *const u8) -> usize {
+    let pe_header_offset = *(base.add(0x3c) as *mut u32);
+    let pe_header = base.add(pe_header_offset as usize);
+    let section_count = (pe_header.add(6) as *mut u16).read_unaligned();
+    let opt_header_size = (pe_header.add(0x14) as *mut u16).read_unaligned();
+    let section_offset = 0x18 + opt_header_size as usize;
+
+    let mut max = base.add(0x1000) as usize;
+    for i in 0..section_count {
+        let section = pe_header.add(section_offset + 0x28 * i as usize);
+
+        let rva = (section.add(0xc) as *mut u32).read_unaligned();
+        let virtual_size = (section.add(0x8) as *mut u32).read_unaligned();
+        let end = (base as usize).wrapping_add(rva as usize).wrapping_add(virtual_size as usize);
+        max = max.max(end);
+    }
+    max
 }
 
 impl Drop for MemoryProtection {
