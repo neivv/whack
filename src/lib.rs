@@ -916,6 +916,17 @@ pub struct Variable<T> {
 
 unsafe impl<T> Sync for Variable<T> { }
 
+impl<T> Clone for Variable<T> {
+    fn clone(&self) -> Self {
+        Self {
+            address: self.address,
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<T> Copy for Variable<T> {}
+
 impl<T> Variable<T> {
     pub fn new(addr: usize) -> Variable<T> {
         Variable {
@@ -923,10 +934,10 @@ impl<T> Variable<T> {
             phantom: PhantomData,
         }
     }
-    pub unsafe fn ptr(&self) -> *const T {
+    pub unsafe fn ptr(self) -> *const T {
         self.address as *const T
     }
-    pub unsafe fn mut_ptr(&self) -> *mut T {
+    pub unsafe fn mut_ptr(self) -> *mut T {
         self.address as *mut T
     }
 }
