@@ -32,12 +32,12 @@ mod hook {
 
 #[cfg(target_arch = "x86")]
 fn dll_path() -> &'static str {
-    "../../tests/test_large_x86.dll"
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_large_x86.dll")
 }
 
 #[cfg(target_arch = "x86_64")]
 fn dll_path() -> &'static str {
-    "../../tests/test_large_x86_64.dll"
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_large_x86_64.dll")
 }
 
 #[cfg(target_arch = "x86")]
