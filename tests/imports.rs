@@ -25,7 +25,7 @@ whack_export!(pub extern "system" GetTickCount() -> u32);
 thread_local!(static CLOSE_HANDLE_COUNT: Cell<u32> = const { Cell::new(0) });
 thread_local!(static GET_PROFILE_INT_COUNT: Cell<u32> = const { Cell::new(0) });
 
-unsafe fn close_handle_log(handle: HANDLE, orig: unsafe extern fn(HANDLE) -> BOOL) -> BOOL {
+unsafe fn close_handle_log(handle: HANDLE, orig: unsafe extern "C" fn(HANDLE) -> BOOL) -> BOOL {
     CLOSE_HANDLE_COUNT.with(|x| x.set(x.get() + 1));
     orig(handle)
 }

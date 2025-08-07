@@ -58,7 +58,7 @@ fn large_hook() {
         let thirteen = GetProcAddress(lib, b"thirteen\0".as_ptr() as *const i8);
         assert!(thirteen != null_mut());
 
-        let thirteen = std::mem::transmute::<_, extern fn(
+        let thirteen = std::mem::transmute::<_, extern "C" fn(
             u32, u32, u32, u32, u32,
             u32, u32, u32, u32, u32,
             u32, u32, u32

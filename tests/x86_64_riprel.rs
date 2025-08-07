@@ -25,18 +25,18 @@ mod test {
     #[derive(Copy, Clone)]
     struct LoadedCode {
         base: *mut u8,
-        get_ref: unsafe extern fn() -> *mut u32,
-        cmp_nonzero: unsafe extern fn() -> u32,
-        cmp_nonzero_byte: unsafe extern fn() -> u32,
-        read_value: unsafe extern fn() -> u32,
-        write_value: unsafe extern fn(u32),
-        indirected_read: unsafe extern fn() -> u32,
+        get_ref: unsafe extern "C" fn() -> *mut u32,
+        cmp_nonzero: unsafe extern "C" fn() -> u32,
+        cmp_nonzero_byte: unsafe extern "C" fn() -> u32,
+        read_value: unsafe extern "C" fn() -> u32,
+        write_value: unsafe extern "C" fn(u32),
+        indirected_read: unsafe extern "C" fn() -> u32,
         // if a1 != 0 { a2 * 2 * a1 as u16 - global } else { a2 }
-        early_jump: unsafe extern fn(u32, u32) -> u32,
+        early_jump: unsafe extern "C" fn(u32, u32) -> u32,
         // Same but also if a1 & 0x8000_0000
-        early_jump_twice: unsafe extern fn(u32, u32) -> u32,
-        with_stack_frame_entry: unsafe extern fn(u32, u32) -> u32,
-        with_stack_frame_middle: unsafe extern fn() -> !,
+        early_jump_twice: unsafe extern "C" fn(u32, u32) -> u32,
+        with_stack_frame_entry: unsafe extern "C" fn(u32, u32) -> u32,
+        with_stack_frame_middle: unsafe extern "C" fn() -> !,
     }
 
     unsafe impl Sync for LoadedCode {}
@@ -438,7 +438,7 @@ mod test {
             0x48, 0x89, 0xe0, 0xc3, // mov rax, rsp; ret
         ];
         ptr::copy_nonoverlapping(data.as_ptr(), out, data.len());
-        let func: unsafe extern fn() -> usize = mem::transmute(out);
+        let func: unsafe extern "C" fn() -> usize = mem::transmute(out);
         let rsp = func();
         // Of course, if the program has made it this far with misaligned rsp,
         // (Likely since the calling code isn't that complex)

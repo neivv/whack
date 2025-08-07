@@ -111,9 +111,9 @@ fn address_hooking() {
         let func3 = GetProcAddress(lib, b"asm_reg_stack_args_h\0".as_ptr() as *const i8);
         assert!(func3 != null_mut());
 
-        let func = std::mem::transmute::<_, extern fn(u32, u32, u32, u32, u32) -> u32>(func);
-        let func2 = std::mem::transmute::<_, extern fn(u32, u32, u32) -> u32>(func2);
-        let func3 = std::mem::transmute::<_, extern fn(u32, u32, u32, u32, u32) -> u32>(func3);
+        let func = std::mem::transmute::<_, extern "C" fn(u32, u32, u32, u32, u32) -> u32>(func);
+        let func2 = std::mem::transmute::<_, extern "C" fn(u32, u32, u32) -> u32>(func2);
+        let func3 = std::mem::transmute::<_, extern "C" fn(u32, u32, u32, u32, u32) -> u32>(func3);
 
         let assert_nonhooked = || {
             let result = func(1, 2, 3, 4, 5);
