@@ -68,6 +68,21 @@ impl ExecutableHeap {
     fn allocator_for_base(&mut self, base: *const u8) -> Option<&mut NearModuleAllocator> {
         self.allocators.iter_mut().find(|x| x.base() == base)
     }
+
+    pub fn memory_regions(&self) -> Vec<crate::MemoryRegion> {
+        let mut count = 0usize;
+        for allocator in &self.allocators {
+            count += allocator.allocated_pages().len();
+        }
+        let mut out = Vec::with_capacity(count);
+        for allocator in &self.allocators {
+            out.extend(allocator.allocated_pages().iter().map(|x| crate::MemoryRegion {
+                start: x.0,
+                size: x.1,
+            }));
+        }
+        out
+    }
 }
 
 pub struct UnwindTables {

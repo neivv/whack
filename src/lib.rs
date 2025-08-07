@@ -357,6 +357,11 @@ pub struct Patcher {
 /// Used to flush new unwind tables on drop
 struct PatcherBorrow<'b>(&'b mut Patcher);
 
+pub struct MemoryRegion {
+    pub start: *mut u8,
+    pub size: usize,
+}
+
 impl<'b> std::ops::Deref for PatcherBorrow<'b> {
     type Target = Patcher;
     #[inline]
@@ -419,6 +424,14 @@ impl Patcher {
             exec_heap: platform::ExecutableHeap::new(),
             unwind_tables: platform::UnwindTables::new(),
         }
+    }
+
+    /// Gets memory allocated by this patcher, so that crash dumps will be more accurate,
+    /// and on win64 have proper stack unwinding info.
+    /// Currently does not do anything on 32-bit, as including the hook wrapper memory
+    /// does not help windbg.
+    pub fn memory_regions_for_crash_dump(&self) -> Vec<MemoryRegion> {
+        self.exec_heap.memory_regions()
     }
 
     /// Begins patching the executable.

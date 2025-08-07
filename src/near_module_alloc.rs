@@ -12,6 +12,7 @@ pub struct NearModuleAllocator {
     pos: *mut u8,
     page_end: *mut u8,
     allocation_granularity: usize,
+    allocated_pages: Vec<(*mut u8, usize)>,
 }
 
 unsafe impl Send for NearModuleAllocator {}
@@ -34,8 +35,13 @@ impl NearModuleAllocator {
                 pos,
                 page_end: pos,
                 allocation_granularity: info.dwAllocationGranularity as usize,
+                allocated_pages: Vec::new(),
             }
         }
+    }
+
+    pub fn allocated_pages(&self) -> &[(*mut u8, usize)] {
+        &self.allocated_pages
     }
 
     fn capacity(&self) -> usize {
@@ -75,6 +81,7 @@ impl NearModuleAllocator {
                         assert_eq!(ok as usize, start as usize);
                         self.pos = start;
                         self.page_end = start.add(size);
+                        self.allocated_pages.push((start, size));
                         return true;
                     }
                     // Probably another thread allocated same region at the same time, could

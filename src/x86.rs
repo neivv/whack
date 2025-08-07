@@ -42,6 +42,11 @@ impl ExecutableHeap {
         }
         unsafe { HeapAlloc(self.handle, 0, size) as *mut u8 }
     }
+
+    pub fn memory_regions(&self) -> Vec<crate::MemoryRegion> {
+        // Not done on x86 (for now?)
+        Vec::new()
+    }
 }
 
 pub struct UnwindTables;
