@@ -10,8 +10,9 @@ mod test {
     use std::ptr::{self, null_mut};
     use std::sync::atomic::{AtomicU32};
 
-    use winapi::um::memoryapi::{VirtualAlloc};
-    use winapi::um::winnt;
+    use windows_sys::Win32::System::{
+        Memory::{VirtualAlloc, MEM_RESERVE, MEM_COMMIT, PAGE_EXECUTE_READWRITE},
+    };
 
     use whack::Patcher;
 
@@ -79,8 +80,8 @@ mod test {
             let out = VirtualAlloc(
                 null_mut(),
                 4096,
-                winnt::MEM_RESERVE | winnt::MEM_COMMIT,
-                winnt::PAGE_EXECUTE_READWRITE,
+                MEM_RESERVE | MEM_COMMIT,
+                PAGE_EXECUTE_READWRITE,
             ) as *mut u8;
             assert!(out.is_null() == false);
             ptr::copy_nonoverlapping(data.as_ptr(), out, data.len());
@@ -430,8 +431,8 @@ mod test {
         let out = VirtualAlloc(
             null_mut(),
             4096,
-            winnt::MEM_RESERVE | winnt::MEM_COMMIT,
-            winnt::PAGE_EXECUTE_READWRITE,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_EXECUTE_READWRITE,
         ) as *mut u8;
         assert!(out.is_null() == false);
         let data = [

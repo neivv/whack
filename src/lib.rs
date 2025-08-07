@@ -1,10 +1,5 @@
 #![allow(clippy::style, clippy::needless_lifetimes, clippy::manual_range_patterns)]
 
-extern crate byteorder;
-extern crate lde;
-extern crate smallvec;
-extern crate winapi;
-
 #[macro_use]
 #[doc(hidden)]
 pub mod macros;

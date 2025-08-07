@@ -1,6 +1,5 @@
 #[macro_use]
 extern crate whack;
-extern crate winapi;
 
 use std::cell::Cell;
 use std::ffi::OsStr;
@@ -11,11 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use whack::Patcher;
 
-use winapi::shared::minwindef::BOOL;
-use winapi::um::fileapi;
-use winapi::um::handleapi::{self, INVALID_HANDLE_VALUE};
-use winapi::um::winbase;
-use winapi::um::winnt::{self, HANDLE};
+use windows_sys::core::BOOL;
+use windows_sys::Win32::Foundation::{self, HANDLE, INVALID_HANDLE_VALUE};
 
 whack_export!(pub extern "system" CreateFileW(*const u16, u32, u32, u32, u32, u32, u32) -> HANDLE);
 whack_export!(pub extern "system" CloseHandle(HANDLE) -> BOOL);
@@ -77,11 +73,11 @@ fn import_hooking() {
         assert!(!std::path::Path::new("file.dat").exists());
         assert!(std::path::Path::new("file.abc").exists());
         let before = CLOSE_HANDLE_COUNT.with(|x| x.get());
-        handleapi::CloseHandle(result);
+        Foundation::CloseHandle(result);
         let after = CLOSE_HANDLE_COUNT.with(|x| x.get());
         assert_eq!(after, before + 1);
         let before = GET_PROFILE_INT_COUNT.with(|x| x.get());
-        winbase::GetProfileIntW(null_mut(), null_mut(), 0);
+        windows_sys::Win32::System::WindowsProgramming::GetProfileIntW(null_mut(), null_mut(), 0);
         let after = GET_PROFILE_INT_COUNT.with(|x| x.get());
         assert_eq!(after, before + 1);
         std::fs::remove_file("file.abc").unwrap();
@@ -94,7 +90,7 @@ fn import_hooking() {
         let result = create_file("file.dat");
         assert!(std::path::Path::new("file.dat").exists());
         assert!(!std::path::Path::new("file.abc").exists());
-        handleapi::CloseHandle(result);
+        Foundation::CloseHandle(result);
         std::fs::remove_file("file.dat").unwrap();
     }
     {
@@ -105,19 +101,23 @@ fn import_hooking() {
         let result = create_file("file.dat");
         assert!(!std::path::Path::new("file.dat").exists());
         assert!(std::path::Path::new("file.abc").exists());
-        handleapi::CloseHandle(result);
+        Foundation::CloseHandle(result);
         std::fs::remove_file("file.abc").unwrap();
     }
 }
 
 unsafe fn create_file(path: &str) -> HANDLE {
-    let result = fileapi::CreateFileW(
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        self, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_ATTRIBUTE_NORMAL,
+    };
+    let result = FileSystem::CreateFileW(
         winapi_str(path).as_ptr(),
-        winnt::GENERIC_READ | winnt::GENERIC_WRITE,
-        winnt::FILE_SHARE_READ | winnt::FILE_SHARE_WRITE,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
         null_mut(),
-        fileapi::CREATE_NEW,
-        winnt::FILE_ATTRIBUTE_NORMAL,
+        FileSystem::CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL,
         null_mut()
     );
     assert!(result != INVALID_HANDLE_VALUE);

@@ -1,10 +1,12 @@
 use std::mem;
 use std::ptr::{NonNull};
 
-use winapi::um::memoryapi::{VirtualAlloc, VirtualQuery};
-use winapi::um::sysinfoapi::{GetSystemInfo, SYSTEM_INFO};
-use winapi::um::winnt::{
-    MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
+use windows_sys::Win32::System::{
+    Memory::{
+        VirtualAlloc, VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE,
+        MEM_RESERVE, PAGE_EXECUTE_READWRITE,
+    },
+    SystemInformation::{GetSystemInfo, SYSTEM_INFO},
 };
 
 pub struct NearModuleAllocator {

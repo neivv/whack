@@ -3,7 +3,12 @@ use std::ptr;
 use std::slice;
 
 use byteorder::{ByteOrder, LE};
-use winapi::um::winnt::{RtlAddFunctionTable, RtlDeleteFunctionTable, RUNTIME_FUNCTION};
+use windows_sys::Win32::System::{
+    Diagnostics::Debug::{
+        RtlAddFunctionTable, RtlDeleteFunctionTable,
+        IMAGE_RUNTIME_FUNCTION_ENTRY as RUNTIME_FUNCTION,
+    },
+};
 
 use crate::helpers::*;
 use crate::insertion_sort;
@@ -126,7 +131,7 @@ impl UnwindTables {
         let mut func = unsafe { mem::zeroed::<RUNTIME_FUNCTION>() };
         func.BeginAddress = u32::try_from((function.0 as usize) - (base as usize)).unwrap();
         func.EndAddress = u32::try_from((function.1 as usize) - (base as usize)).unwrap();
-        unsafe { *func.u.UnwindInfoAddress_mut() = self.buffered_unwind_info.len() as u32; }
+        func.Anonymous.UnwindInfoAddress = self.buffered_unwind_info.len() as u32;
         self.buffered_function_decls.push(func);
         assert!(info.len() & 3 == 0);
         self.buffered_unwind_info.extend_from_slice(&info);
@@ -154,8 +159,8 @@ impl UnwindTables {
             let unwind_info_out_offset =
                 u32::try_from((unwind_info_out as usize) - (base as usize)).unwrap();
             for func in &mut self.buffered_function_decls {
-                let old = *func.u.UnwindInfoAddress_mut();
-                *func.u.UnwindInfoAddress_mut() = old.checked_add(unwind_info_out_offset)
+                let old = func.Anonymous.UnwindInfoAddress;
+                func.Anonymous.UnwindInfoAddress = old.checked_add(unwind_info_out_offset)
                     .unwrap();
             }
 

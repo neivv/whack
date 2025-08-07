@@ -6,12 +6,13 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::raw::c_void;
 use std::ptr;
 
-use winapi::shared::minwindef::HMODULE;
-use winapi::um::errhandlingapi::GetLastError;
-use winapi::um::libloaderapi::GetModuleHandleW;
-use winapi::um::memoryapi::{VirtualProtect, VirtualQuery};
-use winapi::um::processthreadsapi::{FlushInstructionCache, GetCurrentProcess};
-use winapi::um::winnt::{self};
+use windows_sys::Win32::Foundation::{GetLastError, HMODULE};
+use windows_sys::Win32::System::{
+    LibraryLoader::{GetModuleHandleW},
+    Memory::{VirtualProtect},
+    Diagnostics::Debug::{FlushInstructionCache},
+    Threading::{GetCurrentProcess},
+};
 
 use crate::Export;
 use crate::pe;
@@ -81,6 +82,8 @@ impl MemoryProtection {
     /// I.e. will not unprotect two separate memory regions with unmapped memory in between,
     /// no matter what max_address is given.
     fn new_main(start: *const u8, max_address: usize) -> MemoryProtection {
+        use windows_sys::Win32::System::Memory::*;
+
         let start = start as *const _;
         let mut protections = Vec::new();
         if start as usize >= max_address {
@@ -89,8 +92,8 @@ impl MemoryProtection {
             };
         }
         unsafe {
-            let mut mem_info: winnt::MEMORY_BASIC_INFORMATION = mem::zeroed();
-            let mem_info_size = mem::size_of::<winnt::MEMORY_BASIC_INFORMATION>();
+            let mut mem_info: MEMORY_BASIC_INFORMATION = mem::zeroed();
+            let mem_info_size = size_of::<MEMORY_BASIC_INFORMATION>();
             let mut tmp = 0;
             // VirtualQuery returns amount of bytes actually written to MEMORY_BASIC_INFORMATION
             // parameter; So leaving out room for growing the parameter in future.
@@ -105,20 +108,20 @@ impl MemoryProtection {
                 );
             }
             let init_type = mem_info.Type;
-            while matches!(mem_info.State, winnt::MEM_COMMIT | winnt::MEM_RESERVE) &&
+            while matches!(mem_info.State, MEM_COMMIT | MEM_RESERVE) &&
                 mem_info.Type == init_type
             {
-                let needs_unprotect = mem_info.State == winnt::MEM_COMMIT &&
+                let needs_unprotect = mem_info.State == MEM_COMMIT &&
                     match mem_info.Protect {
-                        winnt::PAGE_EXECUTE_READ | winnt::PAGE_READONLY |
-                            winnt::PAGE_EXECUTE => true,
+                        PAGE_EXECUTE_READ | PAGE_READONLY |
+                            PAGE_EXECUTE => true,
                         _ => false,
                     };
                 if needs_unprotect {
                     let ok = VirtualProtect(
                         mem_info.BaseAddress,
                         mem_info.RegionSize,
-                        winnt::PAGE_EXECUTE_READWRITE,
+                        PAGE_EXECUTE_READWRITE,
                         &mut tmp,
                     );
                     if ok == 0 {

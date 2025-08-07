@@ -12,17 +12,25 @@ byteorder = { version = "1.2", default-features = false }
 lde = "0.3"
 smallvec = "1.0"
 
-[dependencies.winapi]
-version = "0.3.4"
+[dependencies.windows-sys]
+version = "0.60"
 features = [
-    "heapapi", "libloaderapi", "memoryapi", "errhandlingapi", "processthreadsapi", "sysinfoapi",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
 ]
 
 [dev-dependencies]
 byteorder = "1.2"
 
-[dev-dependencies.winapi]
-version = "0.3.4"
+[dev-dependencies.windows-sys]
+version = "0.60"
 features = [
-    "fileapi", "handleapi", "heapapi", "libloaderapi", "memoryapi", "sysinfoapi", "winbase"
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_WindowsProgramming",
 ]

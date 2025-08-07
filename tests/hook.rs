@@ -2,15 +2,15 @@
 
 #[macro_use]
 extern crate whack;
-extern crate winapi;
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 
-use winapi::um::libloaderapi::{GetProcAddress, LoadLibraryW};
-use winapi::um::memoryapi::{VirtualAlloc};
-use winapi::um::winnt;
+use windows_sys::Win32::System::{
+    LibraryLoader::{GetProcAddress, LoadLibraryW},
+    Memory::{VirtualAlloc, MEM_RESERVE, PAGE_NOACCESS},
+};
 
 use whack::Patcher;
 #[cfg(target_arch = "x86")]
@@ -101,15 +101,12 @@ fn dll_name() -> &'static str {
 fn address_hooking() {
     unsafe {
         // Test that it works even if the dll is relocated.
-        VirtualAlloc(hook::BASE as *mut _, 1, winnt::MEM_RESERVE, winnt::PAGE_NOACCESS);
+        VirtualAlloc(hook::BASE as *mut _, 1, MEM_RESERVE, PAGE_NOACCESS);
         let lib = LoadLibraryW(winapi_str(dll_path()).as_ptr());
         assert!(lib != null_mut());
-        let func = GetProcAddress(lib, b"test_func\0".as_ptr() as *const i8);
-        assert!(func != null_mut());
-        let func2 = GetProcAddress(lib, b"asm_reg_args_h\0".as_ptr() as *const i8);
-        assert!(func2 != null_mut());
-        let func3 = GetProcAddress(lib, b"asm_reg_stack_args_h\0".as_ptr() as *const i8);
-        assert!(func3 != null_mut());
+        let func = GetProcAddress(lib, b"test_func\0".as_ptr()).unwrap();
+        let func2 = GetProcAddress(lib, b"asm_reg_args_h\0".as_ptr()).unwrap();
+        let func3 = GetProcAddress(lib, b"asm_reg_stack_args_h\0".as_ptr()).unwrap();
 
         let func = std::mem::transmute::<_, extern "C" fn(u32, u32, u32, u32, u32) -> u32>(func);
         let func2 = std::mem::transmute::<_, extern "C" fn(u32, u32, u32) -> u32>(func2);

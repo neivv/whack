@@ -2,15 +2,15 @@
 
 #[macro_use]
 extern crate whack;
-extern crate winapi;
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 
-use winapi::um::libloaderapi::{LoadLibraryW};
-use winapi::um::memoryapi::{VirtualAlloc};
-use winapi::um::winnt;
+use windows_sys::Win32::System::{
+    LibraryLoader::{LoadLibraryW},
+    Memory::{VirtualAlloc, MEM_RESERVE, PAGE_NOACCESS},
+};
 
 use whack::Patcher;
 #[cfg(target_arch = "x86")]
@@ -66,7 +66,7 @@ fn func_calls() {
 
     unsafe {
         // Test that it works even if the dll is relocated.
-        VirtualAlloc(funcs::BASE as *mut _, 1, winnt::MEM_RESERVE, winnt::PAGE_NOACCESS);
+        VirtualAlloc(funcs::BASE as *mut _, 1, MEM_RESERVE, PAGE_NOACCESS);
         let lib = LoadLibraryW(winapi_str(dll_path()).as_ptr());
         assert!(lib != null_mut());
 

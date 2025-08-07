@@ -3,8 +3,10 @@ use std::ptr;
 use std::slice;
 
 use byteorder::{ByteOrder, LE};
-use winapi::um::heapapi::{HeapAlloc, HeapCreate};
-use winapi::um::winnt::{self, HANDLE};
+use windows_sys::Win32::Foundation::{HANDLE};
+use windows_sys::Win32::System::{
+    Memory::{HeapAlloc, HeapCreate, HEAP_CREATE_ENABLE_EXECUTE},
+};
 
 use crate::helpers::*;
 use crate::insertion_sort;
@@ -38,7 +40,7 @@ impl ExecutableHeap {
 
     pub fn allocate(&mut self, size: usize) -> *mut u8 {
         if self.handle.is_null() {
-            self.handle = unsafe { HeapCreate(winnt::HEAP_CREATE_ENABLE_EXECUTE, 0, 0) };
+            self.handle = unsafe { HeapCreate(HEAP_CREATE_ENABLE_EXECUTE, 0, 0) };
         }
         unsafe { HeapAlloc(self.handle, 0, size) as *mut u8 }
     }

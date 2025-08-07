@@ -2,13 +2,14 @@
 
 #[macro_use]
 extern crate whack;
-extern crate winapi;
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 
-use winapi::um::libloaderapi::{GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::{
+    LibraryLoader::{GetProcAddress, LoadLibraryW},
+};
 
 use whack::Patcher;
 
@@ -55,8 +56,7 @@ fn large_hook() {
     unsafe {
         let lib = LoadLibraryW(winapi_str(dll_path()).as_ptr());
         assert!(lib != null_mut());
-        let thirteen = GetProcAddress(lib, b"thirteen\0".as_ptr() as *const i8);
-        assert!(thirteen != null_mut());
+        let thirteen = GetProcAddress(lib, b"thirteen\0".as_ptr()).unwrap();
 
         let thirteen = std::mem::transmute::<_, extern "C" fn(
             u32, u32, u32, u32, u32,

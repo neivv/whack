@@ -2,13 +2,14 @@
 
 #[macro_use]
 extern crate whack;
-extern crate winapi;
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr::null_mut;
 
-use winapi::um::libloaderapi::{GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::{
+    LibraryLoader::{GetProcAddress, LoadLibraryW},
+};
 
 use whack::Patcher;
 #[cfg(target_arch = "x86")]
@@ -30,8 +31,7 @@ fn hook_kernel32() {
     unsafe {
         let lib = LoadLibraryW(winapi_str("kernel32").as_ptr());
         assert!(lib != null_mut());
-        let func = GetProcAddress(lib, b"IsBadStringPtrW\0".as_ptr() as *const i8);
-        assert!(func != null_mut());
+        let func = GetProcAddress(lib, b"IsBadStringPtrW\0".as_ptr()).unwrap();
 
         let func = std::mem::transmute::<_, extern "system" fn(*const u16, usize) -> u32>(func);
 
