@@ -77,8 +77,13 @@ impl NearModuleAllocator {
                         self.page_end = start.add(size);
                         return true;
                     }
+                    // Probably another thread allocated same region at the same time, could
+                    // just VirtualQuery this page again, but may as well move ahead by
+                    // one page that there is some progress.
+                    pos = pos.add(0x1000);
+                } else {
+                    pos = pos.add(buf.RegionSize);
                 }
-                pos = pos.add(buf.RegionSize);
             }
             false
         }
