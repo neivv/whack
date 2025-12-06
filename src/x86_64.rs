@@ -387,20 +387,41 @@ impl HookWrapAssembler {
         let unwind_info: &[u8];
         let unwind_info_buf;
         let stack_reserve_size;
+        let mut non_replacing_return_address_pos = usize::MAX;
         if need_stack_reserve {
             let mut stack_reserve_amount = stack_args_amount;
             if is_non_replacing_hook {
-                // Reserve space for storing all registers except rsp and rbp.
-                // rbp will be used as "frame pointer" to properly restore
-                // rsp regardless of alignment
-                stack_reserve_amount += 14 * 8;
+                // Reserve space for storing all registers except rsp.
+                //
+                // If rsp is aligned to 10, then assuming that we're in middle of function
+                // and need to add a fake return address to keep stack correctly aligned
+                // and to keep stack unwinding happy.
+                //
+                // So stack for non replacing hooks will be
+                // - return address
+                //  (Either added here or assumed to exist already, depending on stack alignment)
+                // - rsp store to know if the return address should be popped or not
+                // - unused 8 bytes to 8-misalign
+                // - stack reserve (stack_reserve_amount | 8)
+                stack_reserve_amount += 15 * 8;
+                let buffer_pos = buffer.buf.len();
                 buffer.buf.extend_from_slice(&[
-                    0x55, // push rbp
-                    0x48, 0x89, 0xe5, // mov rbp, rsp
-                    0x48, 0x81, 0xe4, 0xf0, 0xff, 0xff, 0xff, // and rsp, ffff_ffff_ffff_fff0
-                    0x48, 0x83, 0xec, 0x08, // sub rsp, 8 (Rest of the code assumes rsp like on
-                                            // function entry, so 8-misalign)
+                    0x40, 0xf6, 0xc4, 0x08, // test spl, 8
+                    0x54, // push rsp (Return address / rsp store)
+                    0x75, 0x16, // jne +0x16 (Skip fake return address stuff if at func start)
+                        0x54, // push rsp (rsp store)
+                        0x48, 0x83, 0x04, 0x24, 0x08, // add qword [rsp], 8
+                                                      // Sets rsp to also include popping return
+                                                      // address
+                        // Write fake return address (Actual value set later on in this function
+                        // when the return pos is calculated)
+                        0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // mov dword [rsp + 8], ret_low
+                        0xc7, 0x44, 0x24, 0x0c, 0x00, 0x00, 0x00, 0x00, // mov dword [rsp + c],
+                                                                        // ret_hi
+                    0x48, 0x83, 0xec, 0x08, // sub rsp, 8 (Misalign since rest of the code
+                                            // expects that)
                 ]);
+                non_replacing_return_address_pos = buffer_pos + 17;
             }
             // | 8 to align stack correctly if it was not.
             stack_reserve_size = stack_reserve_amount | 8;
@@ -408,22 +429,42 @@ impl HookWrapAssembler {
             buffer.stack_sub(stack_reserve_size);
 
             let prolog_end = buffer.buf.len();
-            // Adding just the stack sub as unwind info, should be enough
-            unwind_info_buf = [
-                0x01, // version = 1, flags = 0
-                (prolog_end - prolog_start) as u8, // Prolog size (4)
-                0x01, // Unwind code count (Just stack sub)
-                0x00, // No frame register
-                // Unwind codes
-                // Code 0 instruction end offset:
-                (prolog_end - prolog_start) as u8,
-                // Code 0 data:
-                // 2 = Small stack alloc, can represent 8 ~ 128 bytes
-                // Should check if it can fit but should never not fit.
-                0x2 | ((stack_reserve_size >> 3).wrapping_sub(1) << 4) as u8,
-                0x00, 0x00, // Align
-            ];
-            unwind_info = &unwind_info_buf[..];
+            if !is_non_replacing_hook {
+                // Adding just the stack sub as unwind info, should be enough
+                unwind_info_buf = [
+                    0x01, // version = 1, flags = 0
+                    (prolog_end - prolog_start) as u8, // Prolog size (4)
+                    0x01, // Unwind code count (Just stack sub)
+                    0x00, // No frame register
+                    // Unwind codes
+                    // Code 0 instruction end offset:
+                    (prolog_end - prolog_start) as u8,
+                    // Code 0 data:
+                    // 2 = Small stack alloc, can represent 8 ~ 128 bytes
+                    // Should check if it can fit but should never not fit.
+                    0x2 | ((stack_reserve_size >> 3).wrapping_sub(1) << 4) as u8,
+                    0x00, 0x00, // Align
+                ];
+                unwind_info = &unwind_info_buf[..];
+            } else {
+                // Adding just the stack sub as unwind info, should be enough
+                unwind_info_buf = [
+                    0x01, // version = 1, flags = 0
+                    (prolog_end - prolog_start) as u8, // Prolog size
+                    0x02, // Unwind code count (Just stack sub)
+                    0x00, // No frame register
+                    // Unwind codes
+                    // Code 0 instruction end offset:
+                    (prolog_end - prolog_start) as u8,
+                    // Code 0 data:
+                    // 1 = Large stack alloc
+                    0x01,
+                    // Alloc size / 8 (Assuming that it fits on first u8)
+                    // (stack_reserve_size, unused misalign, and rsp restore value)
+                    ((stack_reserve_size + 0x10) >> 3) as u8, 0x00,
+                ];
+                unwind_info = &unwind_info_buf[..];
+            }
         } else {
             stack_reserve_size = 0;
             unwind_info = &[];
@@ -466,13 +507,20 @@ impl HookWrapAssembler {
                 buffer.restore_registers(register_store_offset);
                 buffer.stack_add(stack_reserve_size);
                 buffer.buf.extend_from_slice(&[
-                    0x48, 0x89, 0xec, // mov rsp, rbp
-                    0x5d, // pop rbp
+                    0x48, 0x83, 0xc4, 0x08, // add rsp, 8 (Pop unused align val)
+                    0x5c, // pop rsp
                 ]);
                 unsafe {
                     let len = ins_len_for_copy(orig, JUMP_INS_LEN);
                     buffer.copy_instructions(orig, len);
-                    buffer.jump(AsmValue::Constant(orig as u64 + len as u64));
+                    let ret = orig as u64 + len as u64;
+                    buffer.jump(AsmValue::Constant(ret));
+                    // Set fake return address at hook entry
+                    LE::write_u32(&mut buffer.buf[non_replacing_return_address_pos..], ret as u32);
+                    LE::write_u32(
+                        &mut buffer.buf[non_replacing_return_address_pos + 8..],
+                        (ret >> 32) as u32,
+                    );
                 }
             } else {
                 buffer.stack_add(stack_reserve_size);
@@ -965,7 +1013,7 @@ impl AssemblerBuf {
     pub fn store_registers(&mut self, offset: usize) {
         let mut offset = offset;
         for i in 0..16 {
-            if i == 4 || i == 5 {
+            if i == 4 {
                 continue;
             }
             self.mov_to_stack(offset, AsmValue::Register(i));
@@ -976,7 +1024,7 @@ impl AssemblerBuf {
     pub fn restore_registers(&mut self, offset: usize) {
         let mut offset = offset;
         for i in 0..16 {
-            if i == 4 || i == 5 {
+            if i == 4 {
                 continue;
             }
             if offset < 0x80 {
