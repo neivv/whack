@@ -709,7 +709,8 @@ impl FuncAssembler {
         let ptr_size = mem::size_of::<usize>();
         insertion_sort::sort_by_key(&mut self.current_stack, |&(_, x)| x);
         // Align the stack if necessary
-        let stack_args_count = self.current_stack.last().map(|&(_, x)| x as usize + 1).unwrap_or(0);
+        let mut stack_args_count = self.current_stack.last().map(|&(_, x)| x as usize + 1)
+            .unwrap_or(0);
         let needs_align = (stack_args_count + self.preserved_regs.len()) & 1 == 0;
         let align_size = if needs_align { 8 } else { 0 };
         self.buf.stack_sub(align_size);
@@ -725,6 +726,12 @@ impl FuncAssembler {
         {
             self.buf.push(AsmValue::for_callee(signature_pos));
             self.buf.stack_sub(skipped_args as usize * ptr_size);
+        }
+        if self.current_stack.is_empty() {
+            // Hackfix for shadow space, bit hacky but should work.
+            // If stacks args exist, this won't be used.
+            self.buf.stack_sub(0x20);
+            stack_args_count = 4;
         }
         self.buf.call(AsmValue::Constant(addr as u64));
 
