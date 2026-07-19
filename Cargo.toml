@@ -13,7 +13,7 @@ lde = "0.3"
 smallvec = "1.0"
 
 [dependencies.windows-sys]
-version = "0.60"
+version = ">=0.59, <=0.61"
 features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_LibraryLoader",
@@ -26,7 +26,7 @@ features = [
 byteorder = "1.2"
 
 [dev-dependencies.windows-sys]
-version = "0.60"
+version = ">=0.59, <=0.61"
 features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",

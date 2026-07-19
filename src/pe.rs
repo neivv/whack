@@ -16,29 +16,42 @@ pub unsafe fn import_ptr(
 ) -> Option<*mut usize> {
     let (imps, size, is_64) = import_table(image_base)?;
 
-    let lookups;
-    let addresses;
-
-    'outer: {
-        let mut pos = 0;
-        while pos + 0x14 <= size {
-            let name_offset = read_at::<u32>(imps + pos as usize + 0xc) as usize;
-            if name_offset == 0 {
-                return None;
-            }
-            let name_addr = (image_base + name_offset) as *const u8;
-            let name_len = (0..).find(|&i| *name_addr.add(i) == 0).unwrap_or(0);
-            let name = std::slice::from_raw_parts(name_addr, name_len);
-            if name.eq_ignore_ascii_case(dll_name) {
-                lookups = image_base + read_at::<u32>(imps + pos as usize) as usize;
-                addresses = image_base + read_at::<u32>(imps + pos as usize + 0x10) as usize;
-                break 'outer;
-            }
-            pos += 0x14;
+    let mut pos = 0;
+    while pos + 0x14 <= size {
+        let name_offset = read_at::<u32>(imps + pos as usize + 0xc) as usize;
+        if name_offset == 0 {
+            return None;
         }
-        return None;
+        let name_addr = (image_base + name_offset) as *const u8;
+        let name_len = (0..).find(|&i| *name_addr.add(i) == 0).unwrap_or(0);
+        let name = std::slice::from_raw_parts(name_addr, name_len);
+        if name.eq_ignore_ascii_case(dll_name) {
+            let lookups = image_base + read_at::<u32>(imps + pos as usize) as usize;
+            let addresses = image_base + read_at::<u32>(imps + pos as usize + 0x10) as usize;
+            // It is valid to have multiple import sections for same DLL???
+            // Rust binaries using windows-sys 0.61 do generate that kind of imports
+            // for kernel32??
+            //
+            // So this function can't exit even if the subroutine returns None.
+            if let Some(ret) =
+                import_ptr_from_import_entry(image_base, lookups, addresses, is_64, import)
+            {
+                return Some(ret);
+            }
+        }
+        pos += 0x14;
     }
+    return None;
+}
 
+/// Subroutine for import_ptr, scans import list of an imported dll.
+unsafe fn import_ptr_from_import_entry(
+    image_base: usize,
+    lookups: usize,
+    addresses: usize,
+    is_64: bool,
+    import: &Export,
+) -> Option<*mut usize> {
     let mut pos = 0;
     loop {
         let val = if is_64 {
