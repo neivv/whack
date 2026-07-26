@@ -494,7 +494,7 @@ pub unsafe fn init_funcs(
 macro_rules! whack_fnwrap_write_args {
     ($addr:expr, [$($args:tt)*]) => {
         (
-            whack_name_args!([fnwrap], [$($args)*]),
+            whack_name_args_expr!([fnwrap], [$($args)*]),
             $addr,
         )
     }
@@ -700,15 +700,6 @@ macro_rules! whack_name_args_recurse {
      [$($rest:ident),*]) => {
         whack_impl_import_hook!($($other,)* $([$oki @ $okl($okp): $okt])*);
     };
-    (nope, $imp_stack_pos:expr, [fnwrap],
-     [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],
-     [$($rest:ident),*], [$($rest_loc:ident($rest_pos:expr)),*]) => {
-        whack_fnwrap_write_separated!($([$okl ~ $okp])*);
-    };
-    (yup, $imp_stack_pos:expr, [fnwrap], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
-     [$($rest:ident),*]) => {
-        whack_fnwrap_write_separated!($([$okl ~ $okp])*);
-    };
     (nope, $imp_stack_pos:expr, [fndecl, $($other:tt),*],
      [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],
      [$($rest:ident),*], [$($rest_loc:ident($rest_pos:expr)),*]) => {
@@ -717,5 +708,140 @@ macro_rules! whack_name_args_recurse {
     (yup, $imp_stack_pos:expr, [fndecl, $($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
      [$($rest:ident),*]) => {
         whack_fndecl!($($other,)* $([$okt])*);
+    };
+}
+
+// Should be 100% copy of above macro but only expand to expressions in the end, while
+// above macro expands to items. Rust started to require expr-macro invocations not have semicolons
+// in the end, while item macros must, and the intermediate steps of this macro were made with
+// assumption that they can be either.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! whack_name_args_recurse_expr {
+    // @ stack
+    (nope, $imp_stack_pos:expr, [$($other:tt),*],
+        [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
+        [@ stack($pos:expr) $next_ty:ty, $($rest_args:tt)+],
+        [$next_id:ident, $($rest_id:ident),*],
+        [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
+    {
+        whack_name_args_recurse_expr!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $imploc($impp): $okt])* [$next_id @ stack($pos): $next_ty]],
+            [$($rest_args)*], [$($rest_id),*])
+    };
+    (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
+        [@ stack($pos:expr) $next_ty:ty, $($rest_args:tt)+],
+        [$next_id:ident, $($rest_id:ident),*]) =>
+    {
+        whack_name_args_recurse_expr!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($pos): $next_ty]],
+            [$($rest_args)*], [$($rest_id),*])
+    };
+    // Last arg @ stack
+    (nope, $imp_stack_pos:expr, [$($other:tt),*],
+        [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
+        [@ stack($pos:expr) $next_ty:ty $(,)*],
+        [$next_id:ident, $($rest_id:ident),*],
+        [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
+    {
+        whack_name_args_recurse_expr!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $imploc($impp): $okt])* [$next_id @ stack($pos): $next_ty]],
+            [], [$($rest_id),*])
+    };
+    (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
+        [@ stack($pos:expr) $next_ty:ty $(,)*],
+        [$next_id:ident, $($rest_id:ident),*]) =>
+    {
+        whack_name_args_recurse_expr!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($pos): $next_ty]],
+            [], [$($rest_id),*])
+    };
+    // With @location
+    (nope, $imp_stack_pos:expr, [$($other:tt),*],
+        [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
+        [@ $loc:ident $next_ty:ty, $($rest_args:tt)+],
+        [$next_id:ident, $($rest_id:ident),*],
+        [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
+    {
+        whack_name_args_recurse_expr!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $imploc($impp): $okt])* [$next_id @ $loc(0): $next_ty]],
+            [$($rest_args)*], [$($rest_id),*])
+    };
+    (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
+        [@ $loc:ident $next_ty:ty, $($rest_args:tt)+],
+        [$next_id:ident, $($rest_id:ident),*]) =>
+    {
+        whack_name_args_recurse_expr!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $okl($okp): $okt])* [$next_id @ $loc(0): $next_ty]],
+            [$($rest_args)*], [$($rest_id),*])
+    };
+    // Last arg @location
+    (nope, $imp_stack_pos:expr, [$($other:tt),*],
+        [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
+        [@ $loc:ident $next_ty:ty $(,)*],
+        [$next_id:ident, $($rest_id:ident),*],
+        [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
+    {
+        whack_name_args_recurse_expr!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $imploc($impp): $okt])* [$next_id @ $loc(0): $next_ty]],
+            [], [$($rest_id),*])
+    };
+    (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
+        [@ $loc:ident $next_ty:ty $(,)*],
+        [$next_id:ident, $($rest_id:ident),*]) =>
+    {
+        whack_name_args_recurse_expr!(yup, $imp_stack_pos, [$($other),*],
+            [$([$oki @ $okl($okp): $okt])* [$next_id @ $loc(0): $next_ty]],
+            [], [$($rest_id),*])
+    };
+    // Without @location
+    (nope, $imp_stack_pos:expr, [$($other:tt),*],
+     [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
+        [$next_ty:ty, $($rest_args:tt)+],
+        [$next_id:ident, $($rest_id:ident),*],
+        [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
+    {
+        whack_name_args_recurse_expr!(nope, $imp_stack_pos + 1, [$($other),*],
+            [$([$oki @ $okl($okp) / $imploc($impp): $okt])*
+                [$next_id @ $next_loc($nextp) / stack($imp_stack_pos): $next_ty]],
+            [$($rest_args)*], [$($rest_id),*], [$($rest_loc($rest_pos)),*])
+    };
+    (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
+        [$next_ty:ty, $($rest_args:tt)+],
+        [$next_id:ident, $($rest_id:ident),*]) =>
+    {
+        whack_name_args_recurse_expr!(yup, $imp_stack_pos + 1, [$($other),*],
+            [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($imp_stack_pos): $next_ty]],
+            [$($rest_args)*], [$($rest_id),*])
+    };
+    // Last arg without @location
+    (nope, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*],
+        [$next_ty:ty $(,)*],
+        [$next_id:ident, $($rest_id:ident),*],
+        [$next_loc:ident($nextp:expr), $($rest_loc:ident($rest_pos:expr)),*]) =>
+    {
+        whack_name_args_recurse_expr!(nope, $imp_stack_pos + 1,
+            [$($other),*],
+            [$([$oki @ $okl($okp) / $imploc($impp): $okt])*
+                [$next_id @ $next_loc($nextp) / stack($imp_stack_pos): $next_ty]],
+            [], [$($rest_id),*], [$($rest_loc($rest_pos)),*])
+    };
+    (yup, $imp_stack_pos:expr, [$($other:tt),*], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*],
+        [$next_ty:ty $(,)*],
+        [$next_id:ident, $($rest_id:ident),*]) =>
+    {
+        whack_name_args_recurse_expr!(yup, $imp_stack_pos + 1, [$($other),*],
+            [$([$oki @ $okl($okp): $okt])* [$next_id @ stack($imp_stack_pos): $next_ty]],
+            [], [$($rest_id),*])
+    };
+    // Finish
+    (nope, $imp_stack_pos:expr, [fnwrap],
+     [$([$oki:ident @ $okl:ident($okp:expr) / $imploc:ident($impp:expr): $okt:ty])*], [],
+     [$($rest:ident),*], [$($rest_loc:ident($rest_pos:expr)),*]) => {
+        whack_fnwrap_write_separated!($([$okl ~ $okp])*)
+    };
+    (yup, $imp_stack_pos:expr, [fnwrap], [$([$oki:ident @ $okl:ident($okp:expr): $okt:ty])*], [],
+     [$($rest:ident),*]) => {
+        whack_fnwrap_write_separated!($([$okl ~ $okp])*)
     };
 }

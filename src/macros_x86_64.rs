@@ -168,3 +168,18 @@ macro_rules! whack_name_args {
             stack(11), stack(12), stack(13), stack(14)]);
     };
 }
+
+// Hackfix for rust starting to require expr-macro invocations not be followed by
+// semicolons (Was allowed before), while item-macros still must be, and whack_name_args
+// macros expanding to both based on arguments
+#[macro_export]
+#[doc(hidden)]
+macro_rules! whack_name_args_expr {
+    ([$($rest:tt),*], [$($args:tt)*]) => {
+        whack_name_args_recurse_expr!(nope, 0, [$($rest),*], [], [$($args)*],
+            [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15],
+            [rcx(0), rdx(0), r8(0), r9(0),
+            stack(4), stack(5), stack(6), stack(7), stack(8), stack(9), stack(10),
+            stack(11), stack(12), stack(13), stack(14)])
+    };
+}
